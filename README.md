@@ -20,11 +20,10 @@ Windows uses PowerShell 7.3 or later (`pwsh`):
 .\mutator.ps1 --help
 ```
 
-Run it from the project being analyzed, using the launcher's full path when
-the tool is in another directory:
+To analyze another project from the tool checkout, use `--root`:
 
 ```powershell
-& 'D:\ub-mode\mutator\mutator.ps1' --no-coverage --max-workers 3 src\demo.py
+.\mutator.ps1 --root ..\my-project --no-coverage --max-workers 3 src\demo.py
 ```
 
 The first run creates `.venv` and installs the tool. crapper has to be checked out next to this directory (`../crapper`), because that is where the namespace and function names come from. From a project root the tool walks the tree, skips `test`, `spec`, `vendor`, `node_modules`, and `target`, and writes `.metrics/mutate/<namespace>.edn`.
