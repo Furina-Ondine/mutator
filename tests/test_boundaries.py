@@ -59,7 +59,7 @@ from mutator.metrics import (
 )
 from mutator.model import FormResult, History, PriorForm, Site
 from mutator.report import format_results, format_scan
-from mutator.runner import CommandResult, CommandRunner, _clojure_command
+from mutator.runner import CommandResult, CommandRunner, _clojure_command, display_command
 from mutator.runner import test_plan as command_for
 from mutator.sites import _grammar
 
@@ -338,7 +338,7 @@ def test_commands_follow_the_nearest_project_and_a_killed_process(tmp_path):
     assert directory == sub
     assert command[-2:] == ["-m", "pytest"]
 
-    result = CommandRunner().run(f"{sys.executable} -c 'import time; time.sleep(30)'", tmp_path, 0.4)
+    result = CommandRunner().run([sys.executable, "-c", "import time; time.sleep(30)"], tmp_path, 0.4)
     assert result.timed_out is True
     assert result.code == 124
 
@@ -351,7 +351,7 @@ def test_a_process_without_a_return_code_counts_as_failure(monkeypatch, tmp_path
         def communicate(self, timeout=None):
             return (None, None)
 
-    monkeypatch.setattr("mutator.runner.subprocess.Popen", lambda *args, **kwargs: Proc())
+    monkeypatch.setattr("mutator.runner._spawn", lambda *args, **kwargs: (Proc(), None))
     result = CommandRunner().run("true", tmp_path, 5)
     assert result.code == 1
     assert result.output == ""
@@ -562,7 +562,7 @@ def test_cli_exit_codes_follow_kills_baseline_failure_and_an_empty_tree(tmp_path
     recorded = snapshot.read_text(encoding="utf-8")
 
     path.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
-    failing = f"{sys.executable} -c 'raise SystemExit(1)'"
+    failing = display_command([sys.executable, "-c", "raise SystemExit(1)"])
     code = run(
         [
             "--no-coverage",
@@ -594,7 +594,7 @@ def test_a_scan_does_not_restore_a_backup_and_a_run_does(tmp_path, capsys):
     assert "0 -> 1" in scanned
     assert "1 -> 0" not in scanned
 
-    failing = f"{sys.executable} -c 'raise SystemExit(1)'"
+    failing = display_command([sys.executable, "-c", "raise SystemExit(1)"])
     code = run(
         [
             "--no-coverage",

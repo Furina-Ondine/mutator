@@ -1,9 +1,12 @@
 #!/bin/sh
 # Run the mutation tool, creating a local virtualenv on first use.
+set -e
 ROOT=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 PY="$ROOT/.venv/bin/python"
 if [ ! -x "$PY" ]; then
   python3 -m venv "$ROOT/.venv"
-  "$ROOT/.venv/bin/pip" install -e "$ROOT"
+fi
+if [ ! -f "$ROOT/.venv/bin/mutator" ]; then
+  "$PY" -m pip install -e "$ROOT" >&2
 fi
 exec "$PY" -m mutator "$@"

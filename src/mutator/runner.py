@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import os
+import re
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -63,11 +65,83 @@ def _prefer_worker_sources(cwd: Path, environment: dict) -> None:
 
 
 def display_command(command: Command) -> str:
-    """A shell-looking rendering. A list is quoted so it can be pasted."""
+    """A readable rendering of the command and its arguments."""
 
     if isinstance(command, str):
         return command
+    if os.name == "nt":
+        return subprocess.list2cmdline(command)
     return " ".join(shlex.quote(part) for part in command)
+
+
+def _batch_argument(argument: str) -> str:
+    escaped = re.sub(r'(\\*)"', lambda match: match[1] * 2 + '""', argument)
+    escaped = re.sub(r'(\\+)$', lambda match: match[1] * 2, escaped)
+    return '"' + escaped.replace("%", "%MUTATOR_LITERAL_PERCENT%") + '"'
+
+
+def _executable(command: Command, environment: dict) -> Command:
+    """Resolve Windows .cmd/.bat entry points such as npm and Maven."""
+
+    if os.name == "nt" and isinstance(command, list) and command:
+        executable = shutil.which(command[0])
+        arguments = [executable or command[0], *command[1:]]
+        if Path(arguments[0]).suffix.lower() in {".cmd", ".bat"}:
+            shell = environment.get("COMSPEC") or str(
+                Path(environment.get("SystemRoot", "C:/Windows")) / "System32" / "cmd.exe"
+            )
+            environment["MUTATOR_LITERAL_PERCENT"] = "%"
+            quoted = " ".join(_batch_argument(argument) for argument in arguments)
+            return f'"{shell}" /d /v:off /s /c "{quoted}"'
+        return arguments
+    return command
+
+
+def _terminate_tree(process: subprocess.Popen, job) -> None:
+    if job is not None:
+        job.terminate()
+    else:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+
+
+def _spawn(command: Command, cwd: Path, environment: dict):
+    job = None
+    process = None
+    try:
+        if os.name == "nt":
+            from mutator.windows_job import WindowsJob
+
+            job = WindowsJob()
+        process = subprocess.Popen(
+            _executable(command, environment),
+            cwd=cwd,
+            shell=isinstance(command, str),
+            stdout=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
+            start_new_session=os.name != "nt",
+            creationflags=4 if job is not None else 0,  # CREATE_SUSPENDED
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            env=environment,
+        )
+        if job is not None:
+            job.attach(process.pid)
+        return process, job
+    except BaseException:
+        try:
+            if job is not None:
+                job.close()
+        finally:
+            if process is not None:
+                try:
+                    process.kill()
+                finally:
+                    process.communicate()
+        raise
 
 
 class CommandRunner:
@@ -77,9 +151,9 @@ class CommandRunner:
     def run(self, command: Command, cwd: Path, timeout: float | None) -> CommandResult:
         """Run `command` in `cwd`.
 
-        A list is an argument vector and does not go through a shell, so a
-        path with spaces or metacharacters stays one argument. A string is a
-        command the user typed in `--test-command` or `--coverage-command`.
+        Lists preserve argument boundaries, including Windows batch entry
+        points. A string is a command the user typed in `--test-command` or
+        `--coverage-command` and runs in the platform's shell.
         """
 
         if self.verbose:
@@ -87,18 +161,11 @@ class CommandRunner:
         started = time.monotonic()
         environment = os.environ.copy()
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
+        environment["PYTHONUTF8"] = "1"
+        environment["PYTHONIOENCODING"] = "utf-8"
         _prefer_worker_sources(cwd, environment)
         try:
-            process = subprocess.Popen(
-                command,
-                cwd=cwd,
-                shell=isinstance(command, str),
-                stdout=subprocess.PIPE,
-                stderr=subprocess.STDOUT,
-                start_new_session=True,
-                text=True,
-                env=environment,
-            )
+            process, job = _spawn(command, cwd, environment)
         except OSError as exc:
             seconds = time.monotonic() - started
             return CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc))
@@ -107,10 +174,13 @@ class CommandRunner:
             code = process.returncode if process.returncode is not None else 1
             timed_out = False
         except subprocess.TimeoutExpired:
-            os.killpg(process.pid, signal.SIGKILL)
+            _terminate_tree(process, job)
             output, _err = process.communicate()
             code = 124
             timed_out = True
+        finally:
+            if job is not None:
+                job.close()
         seconds = time.monotonic() - started
         return CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
 
@@ -157,8 +227,9 @@ def _project_interpreter(directory: Path) -> str:
     not link ``.venv``, and resolving ``bin/python`` would leave the virtualenv.
     """
 
+    scripts, executable = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
     for name in (".venv", "venv"):
-        candidate = (directory / name / "bin" / "python").absolute()
+        candidate = (directory / name / scripts / executable).absolute()
         if candidate.is_file() and os.access(candidate, os.X_OK):
             return str(candidate)
     return sys.executable
