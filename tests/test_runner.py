@@ -1,4 +1,7 @@
+import os
 import sys
+
+import pytest
 
 from mutator.runner import CommandRunner, _clojure_command, _python_command, nearest
 from mutator.runner import test_plan as plan_command
@@ -51,21 +54,26 @@ def _executable(path):
     path.chmod(0o755)
 
 
+def _interpreter(project, name=".venv"):
+    scripts, executable = ("Scripts", "python.exe") if os.name == "nt" else ("bin", "python")
+    return project / name / scripts / executable
+
+
 def test_python_command_uses_an_absolute_project_interpreter(tmp_path):
     project = tmp_path / "proj"
-    dot = project / ".venv" / "bin" / "python"
+    dot = _interpreter(project)
     _executable(dot)
     (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     assert _python_command(project) == [str(dot.absolute()), "-m", "pytest"]
 
     other = tmp_path / "other"
-    plain = other / "venv" / "bin" / "python"
+    plain = _interpreter(other, "venv")
     _executable(plain)
     assert _python_command(other) == [str(plain.absolute()), "-m", "unittest", "discover"]
 
-    _executable(other / ".venv" / "bin" / "python")
+    _executable(_interpreter(other))
     assert _python_command(other) == [
-        str((other / ".venv" / "bin" / "python").absolute()),
+        str(_interpreter(other).absolute()),
         "-m",
         "unittest",
         "discover",
@@ -76,18 +84,25 @@ def test_python_command_keeps_the_virtualenv_symlink(tmp_path):
     project = tmp_path / "proj"
     target = project / "real-python"
     _executable(target)
-    link = project / ".venv" / "bin" / "python"
+    link = _interpreter(project)
     link.parent.mkdir(parents=True)
-    link.symlink_to(target)
+    try:
+        link.symlink_to(target)
+    except OSError:
+        pytest.skip("The filesystem does not permit symlinks; copy fallback is tested separately")
     (project / "pytest.ini").write_text("[pytest]\n", encoding="utf-8")
     assert _python_command(project) == [str(link.absolute()), "-m", "pytest"]
 
 
 def test_python_command_falls_back_when_the_virtualenv_cannot_run(tmp_path):
     project = tmp_path / "proj"
-    binary = project / ".venv" / "bin" / "python"
+    binary = _interpreter(project)
     binary.parent.mkdir(parents=True)
     binary.write_text("", encoding="utf-8")
+    if os.name == "nt":
+        binary.unlink()  # Windows access(X_OK) does not inspect executable permission bits.
+    else:
+        binary.chmod(0o000)
     assert _python_command(project) == [sys.executable, "-m", "unittest", "discover"]
 
     missing = tmp_path / "missing"
@@ -131,7 +146,7 @@ def test_a_go_package_path_is_one_argument(tmp_path):
     command, directory = plan_command(root, source, "go", None)
     assert command == ["go", "test", "-count=1", "./a;echo no"]
     assert directory == root
-    echoed = CommandRunner().run(["/bin/echo", command[-1]], directory, None)
+    echoed = CommandRunner().run([sys.executable, "-c", "import sys; print(sys.argv[1])", command[-1]], directory, None)
     assert echoed.code == 0
     assert echoed.output.strip() == "./a;echo no"
 
@@ -149,7 +164,7 @@ def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):
     worker = tmp_path / "target" / "mutation-workers" / "run-1" / "worker-0"
     (worker / "src").mkdir(parents=True)
     (worker / "src" / "demo.py").write_text("VALUE = 'worker'\n", encoding="utf-8")
-    command = f"{sys.executable} -c 'import demo; print(demo.VALUE)'"
+    command = [sys.executable, "-c", "import demo; print(demo.VALUE)"]
     result = CommandRunner().run(command, worker, 5)
     assert result.code == 0
     assert result.output.strip() == "worker"

@@ -171,7 +171,7 @@ def test_worker_count_follows_sites_cores_and_the_requested_cap():
     assert worker_count(2, 8) == min(2, cores)
 
 
-def test_workers_keep_a_private_copy_and_link_the_rest(tmp_path):
+def test_workers_keep_a_private_copy_and_link_the_rest(tmp_path, can_symlink):
     source = tmp_path / "src" / "demo.py"
     source.parent.mkdir()
     source.write_text("def place(x):\n    return x > 0\n", encoding="utf-8")
@@ -192,8 +192,8 @@ def test_workers_keep_a_private_copy_and_link_the_rest(tmp_path):
             assert private.is_file()
             assert not private.is_symlink()
             assert private.read_bytes() == original
-            assert (worker / "src" / "other.py").is_symlink()
-            assert (worker / "tests").is_symlink()
+            assert (worker / "src" / "other.py").is_symlink() == can_symlink
+            assert (worker / "tests").is_symlink() == can_symlink
             assert (worker / "tests" / "keep.txt").read_text(encoding="utf-8") == "keep"
             assert (worker / "pyproject.toml").is_file()
             assert not (worker / "pyproject.toml").is_symlink()
@@ -209,7 +209,7 @@ def test_workers_keep_a_private_copy_and_link_the_rest(tmp_path):
     assert not base.exists()
 
 
-def test_node_imports_the_worker_copy_through_a_relative_specifier(tmp_path):
+def test_node_imports_the_worker_copy_through_a_relative_specifier(tmp_path, can_symlink):
     source = tmp_path / "src" / "find.mjs"
     source.parent.mkdir()
     source.write_text('export const value = "real"\n', encoding="utf-8")
@@ -233,9 +233,9 @@ def test_node_imports_the_worker_copy_through_a_relative_specifier(tmp_path):
             copied = worker / relative
             assert copied.is_file()
             assert not copied.is_symlink()
-        assert (worker / "src" / "notes.mjs").is_symlink()
+        assert (worker / "src" / "notes.mjs").is_symlink() == can_symlink
         assert not (worker / "tests").is_symlink()
-        assert (worker / "tests" / "other.test.mjs").is_symlink()
+        assert (worker / "tests" / "other.test.mjs").is_symlink() == can_symlink
         if shutil.which("node"):
             for script in ("src/find.test.mjs", "tests/use.mjs"):
                 completed = subprocess.run(

@@ -1,4 +1,4 @@
-"""Run mutants in symlink overlays, the way clj-mutate runs its workers.
+"""Run mutants in private overlays, with links when the platform permits them.
 
 Each worker is a directory under target/mutation-workers. Project files are
 linked in. The file under test is a private copy, so workers can mutate it at
@@ -8,8 +8,11 @@ the file's mutants finish.
 
 from __future__ import annotations
 
+import errno
 import os
 import re
+import shutil
+import stat
 import sys
 import uuid
 from concurrent.futures import ThreadPoolExecutor
@@ -90,7 +93,29 @@ def symlink(link: Path, target: Path) -> None:
     link.parent.mkdir(parents=True, exist_ok=True)
     if link.is_symlink() or link.exists():
         link.unlink()
-    link.symlink_to(target.resolve())
+    try:
+        link.symlink_to(target.resolve(), target_is_directory=target.is_dir())
+    except OSError as exc:
+        unsupported = exc.errno in {errno.EPERM, errno.EACCES, errno.ENOSYS, errno.ENOTSUP}
+        if not unsupported and getattr(exc, "winerror", None) != 1314:
+            raise
+        _copy_tree(target, link, frozenset())
+
+
+def _copy_tree(source: Path, destination: Path, ancestors: frozenset[Path]) -> None:
+    """Copy dependencies without caches, build outputs, or directory-link cycles."""
+
+    if not source.is_dir():
+        shutil.copy2(source, destination)
+        return
+    resolved = source.resolve()
+    if resolved in ancestors:
+        return
+    destination.mkdir(parents=True, exist_ok=True)
+    ancestors = ancestors | {resolved}
+    for child in source.iterdir():
+        if child.name not in SKIP_LINK:
+            _copy_tree(child, destination / child.name, ancestors)
 
 
 def delete_tree(path: Path) -> None:
@@ -106,7 +131,11 @@ def delete_tree(path: Path) -> None:
             delete_tree(child)
         path.rmdir()
         return
-    path.unlink()
+    try:
+        path.unlink()
+    except PermissionError:
+        path.chmod(path.stat().st_mode | stat.S_IWUSR)
+        path.unlink()
 
 
 def _copy_configs(worker: Path, root: Path, relative: str) -> None:
@@ -314,7 +343,7 @@ def _execute(
         return "survived"
     destination = directory / relative
     mutated = apply_site(original.decode("utf-8"), site.start, site.end, site.mutant)
-    destination.write_text(mutated, encoding="utf-8")
+    destination.write_bytes(mutated.encode("utf-8"))
     try:
         result = runner.run(command, mapped_cwd(directory, root, cwd), timeout)
     finally:

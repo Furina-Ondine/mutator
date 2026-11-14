@@ -8,11 +8,32 @@ A mutant is killed when the tests fail or time out. It survives when the tests s
 
 ## Run
 
+Python 3.11 or later is required. Linux and macOS use the shell launcher:
+
 ```bash
 ./mutator
 ```
 
+Windows uses the Command Prompt / PowerShell launcher:
+
+```powershell
+.\mutator.cmd --help
+```
+
+Run it from the project being analyzed, using the launcher's full path when
+the tool is in another directory:
+
+```powershell
+& 'D:\ub-mode\mutator\mutator.cmd' --no-coverage --max-workers 3 src\demo.py
+```
+
 The first run creates `.venv` and installs the tool. crapper has to be checked out next to this directory (`../crapper`), because that is where the namespace and function names come from. From a project root the tool walks the tree, skips `test`, `spec`, `vendor`, `node_modules`, and `target`, and writes `.metrics/mutate/<namespace>.edn`.
+
+Both launchers keep the virtualenv in the tool checkout and preserve the
+project's working directory. Installation logs go to stderr. CLI output and
+snapshot files use UTF-8. The project's test and coverage tools must be
+installed; Windows batch entry points such as `npm.cmd` and `mvn.cmd` are
+resolved through `PATH`.
 
 The first run of a tree executes every covered mutant. Start with the file you are working on.
 
@@ -35,9 +56,14 @@ Exit `0` when every executed mutant was killed. Exit `2` when the baseline tests
 
 Mutants of one file run at the same time. The default is one worker per core. `--max-workers` sets the cap. The run uses the smaller of that cap, the number of cores, and the number of selected sites. Files are still taken one at a time.
 
-Each worker is a directory under `target/mutation-workers`. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. The rest of the tree is linked. The original files stay as they are. The overlay is removed when that file's mutants finish.
+Each worker is a directory under `target/mutation-workers`. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. The rest of the tree is linked where symlinks are available. Otherwise, dependencies are copied into each worker, excluding version control, virtualenvs, build outputs, and caches. Windows does not require administrator privileges or Developer Mode. Copying uses more disk space and setup time; `--max-workers` controls the number of concurrent copies. The original files stay as they are. The overlay is removed when that file's mutants finish.
 
 The baseline still runs once, in the real tree, before any worker starts. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the overlay. A copy left under `target/mutator-backup/` by an interrupted older run is restored before a non-scan run.
+
+Timeouts terminate the test process and its descendants before worker cleanup.
+Windows uses a native Job Object, including when a test's parent process has
+already exited. Linux and macOS use a process group. Mutation replacements
+preserve the source file's UTF-8 bytes and line endings.
 
 ## Snapshot
 
@@ -114,6 +140,11 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 
 Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A file missing from the report is treated as uncovered, and the run says so.
 
+Python environments use `Scripts/python.exe` on Windows and `bin/python` on
+Linux and macOS. Generated commands preserve argument boundaries. User-written
+`--test-command` and `--coverage-command` strings use `cmd.exe` on Windows and
+the system shell on Linux and macOS, so use the corresponding shell's quoting.
+
 ## Development
 
 ```bash
@@ -121,3 +152,13 @@ python3 -m venv .venv
 .venv/bin/pip install -e '.[dev]'
 .venv/bin/pytest
 ```
+
+On Windows:
+
+```powershell
+py -3 -m venv .venv
+.\.venv\Scripts\python.exe -m pip install -e '.[dev]'
+.\.venv\Scripts\python.exe -m pytest -q
+```
+
+The test workflow covers Windows, Linux, and macOS with Python 3.11 and 3.14.
