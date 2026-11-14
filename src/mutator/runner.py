@@ -70,7 +70,7 @@ def display_command(command: Command) -> str:
     if isinstance(command, str):
         return command
     if os.name == "nt":
-        return subprocess.list2cmdline(command)
+        return "& " + " ".join("'" + part.replace("'", "''") + "'" for part in command)
     return " ".join(shlex.quote(part) for part in command)
 
 
@@ -107,6 +107,22 @@ def _terminate_tree(process: subprocess.Popen, job) -> None:
             pass
 
 
+def _powershell_command(command: str) -> list[str]:
+    script = (
+        "$ErrorActionPreference = 'Stop'; "
+        "$PSNativeCommandUseErrorActionPreference = $false; "
+        "$PSNativeCommandArgumentPassing = 'Standard'; $LASTEXITCODE = 0; & {\n"
+        + command + "\n}; exit $LASTEXITCODE"
+    )
+    return ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script]
+
+
+def _process_command(command: Command, environment: dict) -> tuple[Command, bool]:
+    if os.name == "nt" and isinstance(command, str):
+        return _powershell_command(command), False
+    return _executable(command, environment), isinstance(command, str)
+
+
 def _spawn(command: Command, cwd: Path, environment: dict):
     job = None
     process = None
@@ -115,10 +131,11 @@ def _spawn(command: Command, cwd: Path, environment: dict):
             from mutator.windows_job import WindowsJob
 
             job = WindowsJob()
+        executable, shell = _process_command(command, environment)
         process = subprocess.Popen(
-            _executable(command, environment),
+            executable,
             cwd=cwd,
-            shell=isinstance(command, str),
+            shell=shell,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
             start_new_session=os.name != "nt",
@@ -153,7 +170,8 @@ class CommandRunner:
 
         Lists preserve argument boundaries, including Windows batch entry
         points. A string is a command the user typed in `--test-command` or
-        `--coverage-command` and runs in the platform's shell.
+        `--coverage-command`, run by PowerShell 7 on Windows and the platform's
+        shell on Linux/macOS.
         """
 
         if self.verbose:

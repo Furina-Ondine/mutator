@@ -87,7 +87,7 @@ Options:
                                 coverage tools, then read the reports it wrote.
   --test-command <cmd>          Run this command for the baseline and every
                                 mutant. The working directory is the project
-                                root.
+                                root. Uses PowerShell 7.3+ on Windows.
   --timeout-factor <number>     Mutant timeout, as a multiple of the baseline
                                 duration. Default: 10. The timeout is at least
                                 2 seconds.
@@ -111,7 +111,7 @@ The default, once a snapshot exists, reruns survivors and sites in functions
 whose text changed. Killed mutants in unchanged functions are kept.
 
 Selected mutants of one file run at the same time, one worker per core unless
---max-workers says otherwise. A worker is a symlink overlay under
+--max-workers says otherwise. A worker is a private overlay under
 target/mutation-workers with its own copy of the mutated file. The project
 tree is left unchanged. A copy left under target/mutator-backup/ by an
 interrupted older run is restored before a non-scan run.

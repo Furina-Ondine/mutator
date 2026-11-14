@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 
 from mutator.model import Site
-from mutator.runner import CommandResult, CommandRunner, _python_command
+from mutator.runner import CommandResult, CommandRunner, _python_command, display_command
 from mutator.workers import create_workers, delete_tree, new_run_dir, run_mutants, symlink
 
 
@@ -293,3 +293,65 @@ def test_main_reconfigures_legacy_text_streams_for_utf8(monkeypatch):
     assert exit_info.value.code == 0
     assert output.getvalue().decode("utf-8") == help_text
     assert errors.getvalue().decode("utf-8") == "中文 😀"
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell command overrides")
+def test_windows_command_overrides_use_powershell_and_preserve_exit_codes(tmp_path):
+    result = CommandRunner().run("$value = 2 + 3; Write-Output ('ps:' + $value); exit 7", tmp_path, 5)
+    assert result.code == 7
+    assert result.output.strip() == "ps:5"
+    native = CommandRunner().run(display_command([sys.executable, "-c", "raise SystemExit(37)"]), tmp_path, 5)
+    assert native.code == 37, native.output
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell command overrides")
+def test_powershell_override_timeout_terminates_orphaned_descendants(tmp_path):
+    child = "from pathlib import Path; import time; time.sleep(1.5); Path('escaped').touch()"
+    parent = f"import subprocess, sys; subprocess.Popen([sys.executable, '-c', {child!r}])"
+    result = CommandRunner().run(display_command([sys.executable, "-c", parent]), tmp_path, 1)
+    assert result.timed_out
+    assert result.code == 124
+    time.sleep(1.5)
+    assert not (tmp_path / "escaped").exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell launcher")
+def test_powershell_launcher_scans_a_unicode_project(tmp_path):
+    import subprocess
+
+    project = tmp_path / "中文 项目 🧪"
+    project.mkdir()
+    (project / "demo.clj").write_text("(ns demo)\n(defn pick [x] (if x 1 0))\n", encoding="utf-8")
+    launcher = Path(__file__).resolve().parents[1] / "mutator.ps1"
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-File", str(launcher), "--scan", "--root", str(project)],
+        cwd=tmp_path, capture_output=True,
+    )
+    assert result.returncode == 0, result.stderr.decode("utf-8", errors="replace")
+    assert "demo.clj" in result.stdout.decode("utf-8")
+    assert not (project / ".metrics").exists()
+    invalid = subprocess.run(
+        ["pwsh", "-NoProfile", "-File", str(launcher), "--max-workers", "invalid"],
+        cwd=tmp_path, capture_output=True,
+    )
+    assert invalid.returncode == 1
+    assert "--max-workers" in invalid.stderr.decode("utf-8")
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows PowerShell launcher")
+def test_powershell_launcher_preserves_arguments_directory_and_exit_code(tmp_path):
+    import subprocess
+
+    (tmp_path / "mutator.py").write_text(
+        "import json, os, sys\n"
+        "print(json.dumps({'args': sys.argv[1:], 'cwd': os.getcwd()}))\n"
+        "raise SystemExit(37)\n", encoding="utf-8",
+    )
+    arguments = ["", 'quoted"value', "a&b", "%PATH%", "$HOME", "`tick", "中文 🧪", "C:\\trailing\\"]
+    launcher = Path(__file__).resolve().parents[1] / "mutator.ps1"
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-File", str(launcher), *arguments],
+        cwd=tmp_path, capture_output=True,
+    )
+    assert result.returncode == 37, result.stderr.decode("utf-8", errors="replace")
+    assert json.loads(result.stdout.decode("utf-8")) == {"args": arguments, "cwd": str(tmp_path)}

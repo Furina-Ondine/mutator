@@ -21,6 +21,21 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
-      - run: python -m pip install -e "mutator[dev]"
-      - run: python -m pytest -q
+      - name: Install and test on Unix
+        if: runner.os != 'Windows'
         working-directory: mutator
+        run: |
+          python -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          .venv/bin/python -m pytest -q
+      - name: Install and test with PowerShell 7
+        if: runner.os == 'Windows'
+        working-directory: mutator
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./.venv/Scripts/python.exe -m pip install -e '.[dev]'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & ./.venv/Scripts/python.exe -m pytest -q
+          exit $LASTEXITCODE

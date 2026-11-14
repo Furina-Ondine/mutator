@@ -14,17 +14,17 @@ Python 3.11 or later is required. Linux and macOS use the shell launcher:
 ./mutator
 ```
 
-Windows uses the Command Prompt / PowerShell launcher:
+Windows uses PowerShell 7.3 or later (`pwsh`):
 
 ```powershell
-.\mutator.cmd --help
+.\mutator.ps1 --help
 ```
 
 Run it from the project being analyzed, using the launcher's full path when
 the tool is in another directory:
 
 ```powershell
-& 'D:\ub-mode\mutator\mutator.cmd' --no-coverage --max-workers 3 src\demo.py
+& 'D:\ub-mode\mutator\mutator.ps1' --no-coverage --max-workers 3 src\demo.py
 ```
 
 The first run creates `.venv` and installs the tool. crapper has to be checked out next to this directory (`../crapper`), because that is where the namespace and function names come from. From a project root the tool walks the tree, skips `test`, `spec`, `vendor`, `node_modules`, and `target`, and writes `.metrics/mutate/<namespace>.edn`.
@@ -142,8 +142,10 @@ Coverage is generated with crapper's commands unless `--use-existing-coverage` o
 
 Python environments use `Scripts/python.exe` on Windows and `bin/python` on
 Linux and macOS. Generated commands preserve argument boundaries. User-written
-`--test-command` and `--coverage-command` strings use `cmd.exe` on Windows and
+`--test-command` and `--coverage-command` strings use PowerShell 7.3+ on Windows and
 the system shell on Linux and macOS, so use the corresponding shell's quoting.
+PowerShell commands preserve explicit exit codes and the last native command's
+exit code; PowerShell errors return a nonzero status.
 
 ## Development
 
