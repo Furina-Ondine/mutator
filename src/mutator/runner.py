@@ -12,6 +12,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from mutator.languages import profile_for
 
 Command = str | list[str]
 
@@ -311,6 +312,12 @@ def _python_plan(root: Path, source: Path) -> tuple[Command, Path]:
     return _python_command(directory), directory
 
 
+def _csharp_plan(root: Path, source: Path) -> tuple[Command, Path]:
+    # Both VSTest and Microsoft.Testing.Platform discover the root's solution
+    # or project without platform-specific target argument syntax.
+    return list(profile_for("csharp").test), root
+
+
 _PLANS = {
     "clojure": _clojure_plan,
     "java": _java_plan,
@@ -318,6 +325,7 @@ _PLANS = {
     "typescript": _typescript_plan,
     "rust": _rust_plan,
     "python": _python_plan,
+    "csharp": _csharp_plan,
 }
 
 

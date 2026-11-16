@@ -10,46 +10,14 @@ files use the TypeScript rules.
 from __future__ import annotations
 
 from mutator.crapper_link import ensure_crapper
-
-_BINARY = {
-    "+": "-",
-    "-": "+",
-    "*": "/",
-    "/": "*",
-    ">": ">=",
-    ">=": ">",
-    "<": "<=",
-    "<=": "<",
-    "==": "!=",
-    "!=": "==",
-    "===": "!==",
-    "!==": "===",
-    "&&": "||",
-    "||": "&&",
-    "??": "||",
-    "and": "or",
-    "or": "and",
-}
-
-_BINARY_PARENTS = {
-    "binary_expression",
-    "binary_operator",
-    "comparison_operator",
-    "boolean_operator",
-}
-
-_UNARY_PARENTS = {"unary_expression", "unary_operator", "not_operator"}
+from mutator.languages import grammar_for, profile_for
 
 _BOOLEANS = {"true": "false", "false": "true", "True": "False", "False": "True"}
 
-_NUMBERS = {
-    "decimal_integer_literal",
-    "integer_literal",
-    "int_literal",
-    "integer",
-    "number",
-    "num_lit",
-}
+_LITERAL_RULES = (
+    ("boolean", _BOOLEANS, "boolean"),
+    ("number", {"0": "1", "1": "0"}, "constant"),
+)
 
 _CLOJURE_HEAD = {
     "+": ("-", "arithmetic"),
@@ -107,15 +75,7 @@ class RawSite:
 
 
 def _grammar(language: str, path: str) -> str:
-    if language == "typescript":
-        if path.endswith(".tsx"):
-            return "tsx"
-        if path.endswith((".js", ".jsx", ".mjs", ".cjs")):
-            return "javascript"
-        return "typescript"
-    if language == "go":
-        return "go"
-    return language
+    return grammar_for(language, path)
 
 
 def _text(data: bytes, node) -> str:
@@ -132,14 +92,6 @@ def _category(token: str) -> str:
     if token in {"&&", "||", "??", "and", "or"}:
         return "logical"
     return "arithmetic"
-
-
-def _binary_mutant(language: str, token: str) -> str | None:
-    if language == "go" and token == "/":
-        return None
-    if token == "??" and language != "typescript":
-        return None
-    return _BINARY.get(token)
 
 
 def _optional_mutant(node) -> str | None:
@@ -174,37 +126,13 @@ def _add(found: list[RawSite], node, original: str, mutant: str, category: str) 
     )
 
 
-def _is_statement(node_type: str) -> bool:
-    return node_type.endswith("_statement") or node_type.endswith("_declaration")
-
-
 def _statement_line(node) -> int:
     current = node.parent
     while current is not None:
-        if _is_statement(current.type):
+        if current.roles & {"statement", "declaration"}:
             return current.start_point[0] + 1
         current = current.parent
     return node.start_point[0] + 1
-
-
-# A literal in a TypeScript type, such as `{ ok: true }` in a return type, never runs.
-_TYPE_NODES = {
-    "type_annotation",
-    "type_alias_declaration",
-    "interface_declaration",
-    "type_arguments",
-    "type_parameters",
-    "literal_type",
-}
-
-
-def _in_type(node) -> bool:
-    current = node.parent
-    while current is not None:
-        if current.type in _TYPE_NODES:
-            return True
-        current = current.parent
-    return False
 
 
 def _clojure_head(node, data: bytes) -> str | None:
@@ -273,99 +201,69 @@ def _visit_clojure(node, data: bytes, found: list[RawSite]) -> None:
         stack.extend(reversed(current.children))
 
 
-def _parent_type(node) -> str:
-    if node.parent is None:
-        return ""
-    return node.parent.type
-
-
-def _visit_binary(node, token: str, parent: str, language: str, found: list[RawSite]) -> None:
-    if parent not in _BINARY_PARENTS:
-        return
-    mutant = _binary_mutant(language, token)
-    if mutant is not None:
-        _add(found, node, token, mutant, _category(token))
-
-
-def _visit_optional(node, token: str, language: str, found: list[RawSite]) -> None:
-    if language != "typescript" or token != "?.":
-        return
+def _optional_rule(node, token: str, profile):
+    if not profile.optional_access or token != "?.":
+        return None
     optional = _optional_mutant(node)
     if optional is not None:
-        _add(found, node, "?.", optional, "optional")
+        return optional, "optional"
+    return None
 
 
-def _visit_not(node, token: str, parent: str, found: list[RawSite]) -> None:
-    if token in {"!", "not"} and parent in _UNARY_PARENTS | {"comparison_operator"}:
-        _add(found, node, token, "", "unary")
+def _operator_rule(node, token: str, profile):
+    if node.parent is None:
+        return None
+    rules = (("binary", profile.binary, _category(token)), ("unary", profile.unary, "unary"))
+    for role, replacements, category in rules:
+        if role in node.parent.roles and token in replacements:
+            return replacements[token], category
+    return None
 
 
-def _visit_negation(node, token: str, parent: str, found: list[RawSite]) -> None:
-    if token == "-" and parent in _UNARY_PARENTS:
-        _add(found, node, token, "", "unary")
+def _literal_rule(node, token: str):
+    for role, replacements, category in _LITERAL_RULES:
+        if role in node.roles and token in replacements:
+            return replacements[token], category
+    return None
 
 
-def _visit_boolean_token(node, token: str, found: list[RawSite]) -> None:
-    if node.type in {"true", "false"} and token in _BOOLEANS:
-        _add(found, node, token, _BOOLEANS[token], "boolean")
-
-
-def _visit_constant(node, token: str, found: list[RawSite]) -> None:
-    if node.type in _NUMBERS and token in {"0", "1"}:
-        _add(found, node, token, _flip01(token), "constant")
-
-
-def _visit_bool_lit(node, data: bytes, found: list[RawSite]) -> None:
-    if node.type != "bool_lit":
+def _visit_node(node, data: bytes, profile, found: list[RawSite]) -> None:
+    if node.child_count:
         return
-    text = _text(data, node)
-    if text in _BOOLEANS:
-        _add(found, node, text, _BOOLEANS[text], "boolean")
-
-
-def _visit_leaf(node, data: bytes, language: str, found: list[RawSite]) -> None:
-    # A literal sits inside the same expression as an operator, so these
-    # checks are independent. `0` is a child of `a > 0`, not an operator.
     token = _text(data, node)
-    parent = _parent_type(node)
-    _visit_binary(node, token, parent, language, found)
-    _visit_optional(node, token, language, found)
-    _visit_not(node, token, parent, found)
-    _visit_negation(node, token, parent, found)
-    _visit_boolean_token(node, token, found)
-    _visit_constant(node, token, found)
-
-
-def _visit_node(node, data: bytes, language: str, found: list[RawSite]) -> None:
-    if language == "typescript" and _in_type(node):
-        return
-    if node.child_count == 0:
-        _visit_leaf(node, data, language, found)
-    else:
-        _visit_bool_lit(node, data, found)
+    replacement = _literal_rule(node, token) or _operator_rule(node, token, profile) or _optional_rule(node, token, profile)
+    if replacement is not None:
+        mutant, category = replacement
+        _add(found, node, token, mutant, category)
 
 
 def _visit(node, data: bytes, language: str, found: list[RawSite]) -> None:
     # An explicit stack: a 1,200-term expression must not raise RecursionError.
     stack = [node]
+    profile = profile_for(language)
     while stack:
         current = stack.pop()
-        _visit_node(current, data, language, found)
+        if "metadata" in current.roles or current.type in profile.skip_nodes:
+            continue
+        _visit_node(current, data, profile, found)
         stack.extend(reversed(current.children))
 
 
-def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
+def discover_raw(
+    source: str, language: str, path: str, *, project_root: str | None = None,
+) -> list[RawSite]:
     """Mutation sites in source order. Offsets are UTF-8 byte offsets."""
 
-    crapper = ensure_crapper()
+    ensure_crapper()
+    from crapper.frontend import parse_document
+
     data = source.encode("utf-8")
-    grammar = _grammar(language, path)
-    _data, tree = crapper.languages.treesitter.parse(source, grammar)
+    document = parse_document(source, language, path, project_root)
     found: list[RawSite] = []
     if language == "clojure":
-        _visit_clojure(tree.root_node, data, found)
+        _visit_clojure(document.root, data, found)
     else:
-        _visit(tree.root_node, data, language, found)
+        _visit(document.root, data, language, found)
     found.sort(key=lambda site: (site.line, site.start, site.end))
     return found
 

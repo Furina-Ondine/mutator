@@ -18,29 +18,30 @@ def format_results(forms: list[FormResult]) -> str:
     namespace_width = max(9, min(72, max(len(form.namespace) for form in forms)))
     header = (
         f"{'Function':<{name_width}} {'Namespace':<{namespace_width}} "
-        f"{'Killed':>7} {'Survived':>9} {'Uncovered':>10} {'Sites':>6} {'Score':>7}"
+        f"{'Killed':>7} {'Survived':>9} {'Uncovered':>10} {'Invalid':>8} {'Sites':>6} {'Score':>7}"
     )
     ordered = sorted(
         forms,
         key=lambda form: (form.score is not None, form.score or 0, -form.survived, form.name),
     )
     lines = [header, "-" * len(header)]
-    killed = survived = uncovered = sites = 0
+    killed = survived = uncovered = invalid = sites = 0
     for form in ordered:
         lines.append(
             f"{form.name:<{name_width}} {form.namespace:<{namespace_width}} "
-            f"{form.killed:7d} {form.survived:9d} {form.uncovered:10d} {form.sites:6d} {_score(form)}"
+            f"{form.killed:7d} {form.survived:9d} {form.uncovered:10d} {form.invalid:8d} {form.sites:6d} {_score(form)}"
         )
         killed += form.killed
         survived += form.survived
         uncovered += form.uncovered
+        invalid += form.invalid
         sites += form.sites
     executed = killed + survived
     score = "n/a" if executed == 0 else f"{(killed / executed) * 100:.1f}%"
     lines.append("-" * len(header))
     lines.append(
         f"{'Total':<{name_width}} {'':<{namespace_width}} "
-        f"{killed:7d} {survived:9d} {uncovered:10d} {sites:6d} {score:>7}"
+        f"{killed:7d} {survived:9d} {uncovered:10d} {invalid:8d} {sites:6d} {score:>7}"
     )
     lines.append("")
     return "\n".join(lines)

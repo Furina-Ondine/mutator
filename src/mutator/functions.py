@@ -52,7 +52,7 @@ def is_private(language: str, name: str, source: str, start: int, end: int) -> b
     header = _header(source, start, end)
     if language == "clojure":
         return bool(re.match(r"\(defn-", header))
-    if language == "java":
+    if language in {"java", "csharp"}:
         return bool(re.search(r"\bprivate\b", header))
     if language == "go":
         return name[:1].islower()
@@ -115,6 +115,17 @@ def project_functions(source: str, path: Path, root: Path):
     )
 
 
+def _privacy(language: str, source: str, functions) -> dict[int, bool]:
+    return {id(fn): _member_private(language, source, fn) for fn in functions}
+
+
+def _member_private(language, source, function):
+    declared = getattr(function, "private", None)
+    if declared is not None:
+        return declared
+    return is_private(language, function.name, source, function.start_line, function.end_line)
+
+
 def _contains(fn, line: int, byte: int | None) -> bool:
     if fn.start_line > line or fn.end_line < line:
         return False
@@ -146,11 +157,9 @@ def sites_in_file(source: str, path: Path, root: Path, file_key: str) -> list[Si
     if language is None:
         return []
     functions = project_functions(source, path, root)
-    privacy = {
-        id(fn): is_private(language, fn.name, source, fn.start_line, fn.end_line) for fn in functions
-    }
+    privacy = _privacy(language, source, functions)
     found: list[Site] = []
-    for raw in discover_raw(source, language, path.as_posix()):
+    for raw in discover_raw(source, language, path.resolve().as_posix(), project_root=root.resolve().as_posix()):
         owner = _owner(functions, raw.line, raw.start)
         if owner is None:
             continue
@@ -185,8 +194,10 @@ def form_digests(source: str, path: Path, root: Path) -> dict[tuple[str, str], s
     if language is None:
         return {}
     grouped: dict[tuple[str, str], list] = {}
-    for fn in project_functions(source, path, root):
-        private = is_private(language, fn.name, source, fn.start_line, fn.end_line)
+    functions = project_functions(source, path, root)
+    privacy = _privacy(language, source, functions)
+    for fn in functions:
+        private = privacy[id(fn)]
         key = (fn.namespace, form_id(fn.name, private))
         grouped.setdefault(key, []).append(fn)
     digests = {}
@@ -203,8 +214,10 @@ def form_spans(source: str, path: Path, root: Path) -> dict[tuple[str, str], tup
     crapper = ensure_crapper()
     language = crapper.discover.language_of(path)
     spans = {}
-    for fn in project_functions(source, path, root):
-        private = is_private(language or "", fn.name, source, fn.start_line, fn.end_line)
+    functions = project_functions(source, path, root)
+    privacy = _privacy(language or "", source, functions)
+    for fn in functions:
+        private = privacy[id(fn)]
         key = (fn.namespace, form_id(fn.name, private))
         if key not in spans:
             spans[key] = (fn.start_line, fn.end_line, fn.name, private)

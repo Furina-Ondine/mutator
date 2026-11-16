@@ -4,6 +4,12 @@ from mutator.functions import form_id, is_private, project_functions, sites_in_f
 from mutator.sites import discover_raw
 
 
+def test_rust_global_literal_keeps_its_physical_line_without_statement_ancestors():
+    source = "\nconst VALUE: i32 =\n    1;\n"
+    sites = discover_raw(source, "rust", "global.rs")
+    assert [(site.line, site.anchor_line, site.original) for site in sites] == [(3, 3, "1")]
+
+
 def _sites(tmp_path: Path, relative: str, source: str):
     path = tmp_path / relative
     path.parent.mkdir(parents=True, exist_ok=True)

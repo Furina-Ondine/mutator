@@ -216,18 +216,36 @@ def _go_lines(root: Path, profile, source_path: str) -> set[int] | None:
     return covered
 
 
-def covered_lines(root: Path, source_path: Path, language: str) -> set[int] | None:
+def coverage_bundle(root: Path, *, source_reports=None, source_paths=None):
+    """Load reports and bind the project sources for one analysis run."""
+    crapper = ensure_crapper()
+    bundle = (crapper.coverage.load_bundle(root) if source_reports is None
+              else crapper.coverage.load_bundle(root, source_reports=source_reports))
+    if source_paths is None:
+        source_paths = crapper.discover.iter_source_files([root])
+    sources = [item.resolve().relative_to(root.resolve()).as_posix() for item in source_paths]
+    bundle.bind_sources(sources)
+    return bundle
+
+
+def covered_lines(root: Path, source_path: Path, language: str, *, source_reports=None,
+                  source_paths=None, bundle=None) -> set[int] | None:
     """Lines with a hit, or None when this file is absent from coverage."""
 
     crapper = ensure_crapper()
     path = source_path.resolve().as_posix()
     if language == "java":
         return _lookup(_jacoco_index(root), path)
-    bundle = crapper.coverage.load_bundle(root)
+    if bundle is None:
+        bundle = coverage_bundle(root, source_reports=source_reports, source_paths=source_paths)
     if language == "go":
         return _go_lines(root, bundle.go_profile, path)
     if language == "clojure":
         html = _covered_from_pairs(_lookup(bundle.form_html, path))
         if html is not None:
             return html
-    return _covered_from_pairs(_lookup(bundle.lcov, path))
+    try:
+        relative = source_path.resolve().relative_to(root.resolve()).as_posix()
+    except ValueError:
+        relative = path
+    return _covered_from_pairs(bundle.line_record_for(relative))

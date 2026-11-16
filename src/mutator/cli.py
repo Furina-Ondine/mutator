@@ -9,7 +9,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from mutator.crapper_link import ensure_crapper
-from mutator.coverage import covered_lines
+from mutator.coverage import coverage_bundle, covered_lines
 from mutator.engine import mutate_file, restore_backups, scan_file
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandRunner
@@ -54,7 +54,7 @@ def _skipped_directory_text() -> str:
 HELP = f"""\
 Usage: mutator [options] [path-or-filter ...]
 
-Discover mutation sites in Clojure, Java, Go, TypeScript, Rust, and Python,
+Discover mutation sites in Clojure, Java, C#, Go, TypeScript, Rust, and Python,
 run the project's tests against each one, and write `.metrics/mutate` for
 uml-viewer. Namespaces and function names are the ones crapper writes into
 `.metrics/crap.edn`.
@@ -121,10 +121,12 @@ Exit codes:
   1  usage error
   2  baseline tests failed
   3  at least one mutant survived
+  4  at least one mutant was invalid and could not be tested
 
 Coverage, when it is produced, uses the same commands as crapper:
   Clojure      clj -M:cov --lcov
   Java         Maven JaCoCo
+  C#           .NET coverage reports (Cobertura or LCOV)
   Go           go test ./... -coverprofile=...
   TypeScript   npm run coverage, Vitest, or c8
   Rust         cargo llvm-cov or cargo tarpaulin
@@ -458,14 +460,29 @@ def _prepare_coverage(options: Options, root: Path, files: list[Path]) -> int:
     return 0
 
 
-def _coverage_for(options: Options, root: Path, path: Path) -> set[int] | None:
+def _coverage_for(options: Options, root: Path, path: Path, bundle=None) -> set[int] | None:
     if options.no_coverage:
         return None
     crapper = ensure_crapper()
     language = crapper.discover.language_of(path)
     if language is None:
         return None
+    if bundle is not None:
+        return covered_lines(root, path, language, bundle=bundle)
+    if not (options.use_existing_coverage or options.scan or options.coverage_command):
+        reports = crapper.runners.generated_reports(root, [path])
+        if reports:
+            return covered_lines(root, path, language, source_reports=reports)
     return covered_lines(root, path, language)
+
+
+def _coverage_context(options: Options, root: Path, files: list[Path]):
+    if options.no_coverage:
+        return None
+    reports = None
+    if not (options.use_existing_coverage or options.scan or options.coverage_command):
+        reports = ensure_crapper().runners.generated_reports(root, files) or None
+    return coverage_bundle(root, source_reports=reports)
 
 
 def _print_help(options: Options) -> int:
@@ -489,12 +506,13 @@ def _restore(root: Path) -> None:
 
 
 def _scan(options: Options, root: Path, files: list[Path]) -> int:
+    bundle = _coverage_context(options, root, files)
     for path in files:
         print(
             scan_file(
                 path,
                 root,
-                covered_lines=_coverage_for(options, root, path),
+                covered_lines=_coverage_for(options, root, path, bundle),
                 ignore_coverage=options.no_coverage,
                 lines=options.lines,
             ),
@@ -513,32 +531,38 @@ def _record(result, forms: list, written: list[str]) -> str:
     print(format_site_log(result.sites, result.statuses), end="")
     forms.extend(result.forms)
     written.extend(result.written)
+    if any(form.invalid for form in result.forms):
+        return "invalid"
     if any(form.survived for form in result.forms):
         return "survived"
     return "ok"
 
 
-def _finish(baseline_failed: bool, survived: bool) -> int:
+def _finish(baseline_failed: bool, survived: bool, invalid: bool = False) -> int:
     if baseline_failed:
         return 2
+    if invalid:
+        return 4
     if survived:
         return 3
     return 0
 
 
 def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
+    bundle = _coverage_context(options, root, files)
     runner = CommandRunner(verbose=options.verbose)
     baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]] = {}
     forms = []
     written: list[str] = []
     baseline_failed = False
     survived = False
+    invalid = False
     for path in files:
         result = mutate_file(
             path,
             root,
             runner=runner,
-            covered_lines=_coverage_for(options, root, path),
+            covered_lines=_coverage_for(options, root, path, bundle),
             ignore_coverage=options.no_coverage,
             mutate_all=options.mutate_all,
             lines=options.lines,
@@ -553,11 +577,13 @@ def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
             baseline_failed = True
         elif outcome == "survived":
             survived = True
+        elif outcome == "invalid":
+            invalid = True
     if forms:
         print(format_results(forms), end="")
     for path in written:
         print(f"Wrote {path}", file=sys.stderr)
-    return _finish(baseline_failed, survived)
+    return _finish(baseline_failed, survived, invalid)
 
 
 def run(argv: list[str] | None = None) -> int:

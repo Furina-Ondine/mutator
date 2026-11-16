@@ -51,6 +51,7 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
         timeout_factor=10,
         mutation_warning=50,
         baselines={},
+        max_workers=1,
     )
     assert path.read_bytes() == original
     assert first.baseline_failed is False
@@ -85,8 +86,8 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
     )
     assert second.forms[0].killed == 1
     assert second.forms[0].survived == 3
-    # Baseline plus the three survivors. The killed mutant stays in the snapshot.
-    assert runner.calls - first_calls == 4
+    # Original baseline, one baseline per worker, and three surviving mutants.
+    assert runner.calls - first_calls == 1 + worker_count(3, None) + 3
 
 
 def test_uncovered_sites_are_not_executed(tmp_path):
@@ -164,6 +165,48 @@ def test_a_failed_baseline_does_not_rewrite_metrics(tmp_path):
     assert not snapshot_path(tmp_path, "demo").exists()
 
 
+def test_root_baseline_failure_stops_before_creating_workers(tmp_path, monkeypatch):
+    from mutator import workers
+
+    path = tmp_path / "src" / "Demo.cs"
+    path.parent.mkdir()
+    path.write_text("class Demo { public int Add(int a, int b) => a + b; }", encoding="utf-8")
+    original = path.read_bytes()
+    snapshot = snapshot_path(tmp_path, "Demo")
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text('{:namespace "demo" :forms []}', encoding="utf-8")
+    previous = snapshot.read_bytes()
+
+    class FailsOnce:
+        verbose = False
+
+        def __init__(self):
+            self.calls = 0
+
+        def run(self, command, cwd, timeout):
+            self.calls += 1
+            return CommandResult(1 if self.calls == 1 else 0, False, 0.01, "baseline diagnostic")
+
+    runner = FailsOnce()
+    created = []
+    new_dir = workers.new_run_dir
+    def record_dir(*args, **kwargs):
+        created.append(True)
+        return new_dir(*args, **kwargs)
+    monkeypatch.setattr(workers, "new_run_dir", record_dir)
+    result = mutate_file(path, tmp_path, runner=runner, covered_lines=None,
+                         ignore_coverage=True, mutate_all=True, lines=None,
+                         test_command="fake", timeout_factor=10, mutation_warning=50,
+                         baselines={}, max_workers=1)
+    assert result.baseline_failed
+    assert "baseline diagnostic" in result.baseline_message
+    assert runner.calls == 1
+    assert created == []
+    assert snapshot.read_bytes() == previous
+    assert path.read_bytes() == original
+    assert not (tmp_path / "target" / "mutation-workers").exists()
+
+
 def test_worker_count_follows_sites_cores_and_the_requested_cap():
     cores = os.cpu_count() or 1
     assert worker_count(10, None) == min(10, cores)
@@ -190,6 +233,7 @@ def test_workers_keep_a_private_copy_and_link_the_rest(tmp_path, can_symlink):
         for worker in workers:
             private = worker / "src" / "demo.py"
             assert private.is_file()
+            assert not private.parent.is_symlink()
             assert not private.is_symlink()
             assert private.read_bytes() == original
             assert (worker / "src" / "other.py").is_symlink() == can_symlink
@@ -300,3 +344,79 @@ def test_restore_backups_puts_an_interrupted_mutant_back(tmp_path):
     assert restored == [source]
     assert source.read_text(encoding="utf-8") == "original\n"
     assert not backup.exists()
+
+
+def test_missing_worker_dependency_fails_baseline_without_writing_metrics(tmp_path):
+    import sys
+    from mutator.runner import CommandRunner
+
+    source = tmp_path / 'demo.py'
+    original = b'def add(a, b):\n    return a + b\n'
+    source.write_bytes(original)
+    (tmp_path / '.git').mkdir()
+    (tmp_path / 'check.py').write_text(
+        'from pathlib import Path\nassert Path(".git").is_dir(), "missing project metadata"\n'
+        'from demo import add\nassert add(2, 1) == 3\n', encoding='utf-8')
+    snapshot = snapshot_path(tmp_path, 'demo')
+    snapshot.parent.mkdir(parents=True)
+    snapshot.write_text('existing metrics', encoding='utf-8')
+    result = mutate_file(source, tmp_path, runner=CommandRunner(), covered_lines=None,
+                         ignore_coverage=True, mutate_all=True, lines=None,
+                         test_command=f'{"& " if os.name == "nt" else ""}"{sys.executable}" check.py', timeout_factor=10,
+                         mutation_warning=50, baselines={}, max_workers=1)
+    assert result.baseline_failed
+    assert 'worker-0' in result.baseline_message
+    assert 'missing project metadata' in result.baseline_message
+    assert result.statuses == {}
+    assert snapshot.read_text(encoding='utf-8') == 'existing metrics'
+    assert source.read_bytes() == original
+    assert not list((tmp_path / 'target' / 'mutation-workers').glob('run-*'))
+
+
+def test_real_worker_baseline_allows_mutation_and_records_kill(tmp_path):
+    import sys
+    from mutator.runner import CommandRunner
+
+    source = tmp_path / 'demo.py'
+    original = b'def add(a, b):\n    return a + b\n'
+    source.write_bytes(original)
+    (tmp_path / 'check.py').write_text('from demo import add\nassert add(2, 1) == 3\n', encoding='utf-8')
+    result = mutate_file(source, tmp_path, runner=CommandRunner(), covered_lines=None,
+                         ignore_coverage=True, mutate_all=True, lines=None,
+                         test_command=f'{"& " if os.name == "nt" else ""}"{sys.executable}" check.py', timeout_factor=10,
+                         mutation_warning=50, baselines={}, max_workers=1)
+    assert not result.baseline_failed
+    assert result.forms[0].killed == 1
+    assert source.read_bytes() == original
+    assert not list((tmp_path / 'target' / 'mutation-workers').glob('run-*'))
+
+
+def test_all_workers_must_pass_before_any_mutation(tmp_path, monkeypatch):
+    from mutator import workers
+
+    monkeypatch.setattr(workers.os, 'cpu_count', lambda: 2)
+    source = tmp_path / 'demo.py'
+    original = b'def add(a, b):\n    return a + b if a > 0 else b\n'
+    source.write_bytes(original)
+
+    class TimeoutSecondWorker:
+        verbose = False
+        def __init__(self):
+            self.seen = []
+        def run(self, command, cwd, timeout):
+            assert timeout is None
+            assert (cwd / 'demo.py').read_bytes() == original
+            self.seen.append(cwd)
+            return CommandResult(0, cwd.name == 'worker-1', 0.01, 'worker timeout detail')
+
+    runner = TimeoutSecondWorker()
+    result = mutate_file(source, tmp_path, runner=runner, covered_lines=None,
+                         ignore_coverage=True, mutate_all=True, lines=None,
+                         test_command='fake', timeout_factor=10, mutation_warning=50,
+                         baselines={}, max_workers=2)
+    assert result.baseline_failed
+    assert 'worker-1' in result.baseline_message
+    assert 'timed out' in result.baseline_message
+    assert [path.name for path in runner.seen[1:]] == ['worker-0', 'worker-1']
+    assert not snapshot_path(tmp_path, 'demo').exists()
+    assert not list((tmp_path / 'target' / 'mutation-workers').glob('run-*'))

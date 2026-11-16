@@ -32,7 +32,7 @@ class Site:
 
 @dataclass
 class FormResult:
-    """Killed, survived, and uncovered totals for one operation."""
+    """Mutation outcomes and uncovered totals for one operation."""
 
     id: str
     namespace: str
@@ -46,6 +46,7 @@ class FormResult:
     survived: int = 0
     uncovered: int = 0
     sites: int = 0
+    invalid: int = 0
 
     @property
     def score(self) -> float | None:

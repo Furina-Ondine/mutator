@@ -1,9 +1,9 @@
-"""Run mutants in private overlays, with links when the platform permits them.
+"""Run mutants in private workspaces.
 
-Each worker is a directory under target/mutation-workers. Project files are
-linked in. The file under test is a private copy, so workers can mutate it at
-the same time without touching the original tree. The overlay is removed when
-the file's mutants finish.
+Overlay workers under target/mutation-workers link shared project files.
+The mutated file is always private. Copy workers live outside the original
+tree and preserve the build inputs without sharing writable build outputs.
+Workspaces are removed when the file's mutants finish.
 """
 
 from __future__ import annotations
@@ -14,6 +14,8 @@ import re
 import shutil
 import stat
 import sys
+import time
+import tempfile
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -21,7 +23,9 @@ from queue import Empty, Queue
 from threading import Lock
 
 from mutator.model import Site
+from mutator.crapper_link import ensure_crapper
 from mutator.runner import Command
+from mutator.languages import profile_for
 from mutator.sites import apply_site
 
 # Build output and the worker tree itself must not be shared. A link to
@@ -47,6 +51,12 @@ SKIP_LINK = frozenset(
         ".gradle",
     }
 )
+
+COPY_EXCLUDED = frozenset({
+    ".git", ".hg", ".svn", ".idea", ".venv", "venv", ".metrics",
+    "__pycache__", ".pytest_cache", ".mypy_cache", ".clj-kondo", ".gradle",
+    "bin", "obj", "TestResults", ".artifacts", ".vs", "BenchmarkDotNet.Artifacts",
+})
 
 CONFIGS = (
     "deps.edn",
@@ -83,8 +93,9 @@ def worker_count(site_count: int, requested: int | None) -> int:
     return max(1, min(site_count, processors, limit))
 
 
-def new_run_dir(root: Path) -> Path:
-    directory = root / "target" / "mutation-workers" / f"run-{uuid.uuid4()}"
+def new_run_dir(root: Path, *, isolated: bool = False) -> Path:
+    base = Path(tempfile.gettempdir()) / "ub-mode" if isolated else root / "target"
+    directory = base / "mutation-workers" / f"run-{uuid.uuid4()}"
     directory.mkdir(parents=True)
     return directory
 
@@ -102,25 +113,55 @@ def symlink(link: Path, target: Path) -> None:
         _copy_tree(target, link, frozenset())
 
 
-def _copy_tree(source: Path, destination: Path, ancestors: frozenset[Path]) -> None:
+def _copy_tree(
+    source: Path, destination: Path, ancestors: frozenset[Path], excluded=SKIP_LINK,
+    excluded_paths=frozenset(),
+) -> None:
     """Copy dependencies without caches, build outputs, or directory-link cycles."""
 
+    source = _filesystem_path(source)
+    destination = _filesystem_path(destination)
+    if source.resolve() in excluded_paths:
+        return
     if not source.is_dir():
-        shutil.copy2(source, destination)
+        _copy_file(source, destination)
         return
     resolved = source.resolve()
     if resolved in ancestors:
         return
-    destination.mkdir(parents=True, exist_ok=True)
+    destination.mkdir(parents=True)
     ancestors = ancestors | {resolved}
     for child in source.iterdir():
-        if child.name not in SKIP_LINK:
-            _copy_tree(child, destination / child.name, ancestors)
+        if child.name not in excluded:
+            _copy_tree(child, destination / child.name, ancestors, excluded, excluded_paths)
+
+
+def _copy_file(source: Path, destination: Path) -> None:
+    try:
+        shutil.copy2(source, destination)
+    except OSError as exc:
+        exc.add_note(f"Worker copy source: {source}")
+        exc.add_note(f"Worker copy destination: {destination}")
+        raise
+
+
+def _filesystem_path(path: Path) -> Path:
+    """Windows extended paths apply to file I/O, not commands or project layout."""
+
+    if os.name != "nt":
+        return path
+    text = str(path.absolute())
+    if text.startswith("\\\\?\\"):
+        return Path(text)
+    if text.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + text[2:])
+    return Path("\\\\?\\" + text)
 
 
 def delete_tree(path: Path) -> None:
     """Remove a worker tree without following a link into the real project."""
 
+    path = _filesystem_path(path)
     if path.is_symlink():
         path.unlink()
         return
@@ -129,7 +170,7 @@ def delete_tree(path: Path) -> None:
     if path.is_dir():
         for child in list(path.iterdir()):
             delete_tree(child)
-        path.rmdir()
+        _remove_directory(path)
         return
     try:
         path.unlink()
@@ -138,6 +179,17 @@ def delete_tree(path: Path) -> None:
         path.unlink()
 
 
+def _remove_directory(path: Path) -> None:
+    # Job termination can return before Windows releases a child's working directory.
+    deadline = time.monotonic() + 2.0
+    while True:
+        try:
+            path.rmdir()
+            return
+        except OSError as error:
+            if getattr(error, "winerror", None) != 32 or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 def _copy_configs(worker: Path, root: Path, relative: str) -> None:
     for name in CONFIGS:
         source = root / name
@@ -300,16 +352,35 @@ def create_workers(
     base: Path, root: Path, relative: str, original: bytes, count: int
 ) -> list[Path]:
     created = []
+    language = ensure_crapper().discover.language_of(relative)
+    if profile_for(language or "").workspace == "copy":
+        return _copy_workers(base, root, relative, original, count)
     first = relative.split("/", 1)[0]
     importers = importers_of(root, relative)
     for index in range(count):
         worker = base / f"worker-{index}"
-        worker.mkdir(parents=True, exist_ok=True)
+        worker.mkdir()
         _copy_configs(worker, root, relative)
         _link_children(worker, root, {first})
         _overlay(worker, root, relative, original)
         for importer in importers:
             _copy_importer(worker, root, importer)
+        created.append(worker)
+    return created
+
+
+def _copy_workers(base: Path, root: Path, relative: str, original: bytes, count: int) -> list[Path]:
+    """Copy the build graph so project references never share writable outputs."""
+
+    created = []
+    for index in range(count):
+        worker = base / f"worker-{index}"
+        excluded_paths = frozenset({
+            _filesystem_path(base.parent).resolve(),
+            _filesystem_path(root / "target" / "mutation-workers").resolve(),
+        })
+        _copy_tree(root, worker, frozenset(), COPY_EXCLUDED, excluded_paths)
+        (worker / relative).write_bytes(original)
         created.append(worker)
     return created
 
@@ -345,9 +416,35 @@ def _execute(
     mutated = apply_site(original.decode("utf-8"), site.start, site.end, site.mutant)
     destination.write_bytes(mutated.encode("utf-8"))
     try:
-        result = runner.run(command, mapped_cwd(directory, root, cwd), timeout)
+        status = _run_mutant(runner, command, mapped_cwd(directory, root, cwd), timeout, relative)
     finally:
         destination.write_bytes(original)
+    return status
+
+
+def _invalid(output: str) -> str:
+    print("INVALID: mutant could not be built; no test kill was recorded.", file=sys.stderr)
+    if output:
+        print("\n".join(output.splitlines()[-20:]), file=sys.stderr)
+    return "invalid"
+
+
+def _run_mutant(runner, command: Command, cwd: Path, timeout: float, relative: str) -> str:
+    language = ensure_crapper().discover.language_of(relative)
+    profile = profile_for(language or "")
+    if profile.build and command == list(profile.test):
+        build = runner.run(list(profile.build), cwd, None)
+        if build.code != 0 or build.timed_out:
+            return _invalid(build.output)
+        command = list(profile.built_test)
+    result = runner.run(command, cwd, timeout)
+    return _result_status(result, profile)
+
+
+def _result_status(result, profile) -> str:
+    output = re.sub(r"\x1b\[[0-?]*[ -/]*[@-~]", "", result.output)
+    if result.code != 0 and profile.compiler_error and re.search(profile.compiler_error, output):
+        return _invalid(result.output)
     if result.timed_out or result.code != 0:
         return "killed"
     return "survived"
@@ -435,6 +532,16 @@ def _run_all(
             future.result()
 
 
+def _worker_baseline(directories, root, cwd, runner, command) -> str | None:
+    for directory in directories:
+        result = runner.run(command, mapped_cwd(directory, root, cwd), None)
+        if result.code != 0 or result.timed_out:
+            tail = "\n".join(result.output.splitlines()[-20:])
+            reason = "timed out" if result.timed_out else f"exit code {result.code}"
+            return f"Worker baseline failed in {directory}: {reason}\n{tail}"
+    return None
+
+
 def run_mutants(
     root: Path,
     source: Path,
@@ -447,17 +554,22 @@ def run_mutants(
     timeout: float,
     file_key: str,
     outcomes: dict[str, str],
-) -> None:
+) -> str | None:
     """Mutate ``sites`` in parallel overlays of ``root``. The source stays put."""
 
     if not sites:
         return
-    base = new_run_dir(root)
+    language = ensure_crapper().discover.language_of(source)
+    isolated = profile_for(language or "").workspace == "copy"
+    base = new_run_dir(root, isolated=isolated)
     try:
         relative = source.resolve().relative_to(root.resolve()).as_posix()
         directories = create_workers(
             base, root, relative, original, worker_count(len(sites), max_workers)
         )
+        failure = _worker_baseline(directories, root, cwd, runner, command)
+        if failure is not None:
+            return failure
         _run_all(
             directories,
             sites,

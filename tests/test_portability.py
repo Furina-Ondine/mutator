@@ -25,11 +25,13 @@ def test_workers_fall_back_to_independent_copies_without_symlink_privilege(tmp_p
         directory.mkdir()
         (directory / "excluded.txt").write_text("skip", encoding="utf-8")
 
-    def denied(*args, **kwargs):
+    def denied(link, target, **kwargs):
+        assert Path(target).resolve() != source.parent.resolve()
         raise OSError(errno.EPERM, "symlink privilege is unavailable")
 
     monkeypatch.setattr(Path, "symlink_to", denied)
     base = new_run_dir(tmp_path)
+    assert base.parent == tmp_path / "target" / "mutation-workers"
     try:
         workers = create_workers(base, tmp_path, "src/demo.py", source.read_bytes(), 2)
         for worker in workers:
@@ -109,8 +111,9 @@ def test_mutations_preserve_crlf_and_utf8_bytes(tmp_path):
         verbose = False
 
         def run(self, command, cwd, timeout):
-            assert (cwd / "demo.py").read_bytes() == original.replace(b"+", b"-")
-            return CommandResult(1, False, 0.01, "")
+            expected = original if timeout is None else original.replace(b"+", b"-")
+            assert (cwd / "demo.py").read_bytes() == expected
+            return CommandResult(0 if timeout is None else 1, False, 0.01, "")
 
     outcomes = {}
     run_mutants(tmp_path, source, original, [site], 1, CheckBytes(), ["unused"], tmp_path, 5, "demo.py", outcomes)

@@ -64,7 +64,7 @@ def _outcomes_of(data: dict) -> dict[str, str]:
         if not isinstance(key, str):
             continue
         status = value[1:] if isinstance(value, str) and value.startswith(":") else value
-        if status in {"killed", "survived"}:
+        if status in {"killed", "survived", "invalid"}:
             found[key] = status
     return found
 
@@ -131,6 +131,7 @@ def _render_form(form: FormResult) -> dict:
         "survived": form.survived,
         "uncovered": form.uncovered,
         "sites": form.sites,
+        "invalid": form.invalid,
     }
 
 
@@ -173,7 +174,7 @@ def _file_outcomes(outcomes: dict[str, str], file_key: str) -> dict[str, str]:
     for mutation, status in outcomes.items():
         if mutation_file(mutation) != file_key:
             continue
-        if status not in {"killed", "survived"}:
+        if status not in {"killed", "survived", "invalid"}:
             continue
         found[mutation] = status
     return found

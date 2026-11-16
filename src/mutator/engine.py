@@ -117,7 +117,7 @@ def _forms(
     for key, (start, end, name, private) in sorted(spans.items(), key=lambda item: item[1][0]):
         namespace, form = key
         owned = grouped.get(key, [])
-        killed = survived = uncovered = 0
+        killed = survived = uncovered = invalid = 0
         for site in owned:
             if not covered[site.mutation_id]:
                 uncovered += 1
@@ -127,6 +127,8 @@ def _forms(
                 killed += 1
             elif status == "survived":
                 survived += 1
+            elif status == "invalid":
+                invalid += 1
             elif lines is None:
                 survived += 1
         forms.append(
@@ -143,6 +145,7 @@ def _forms(
                 survived=survived,
                 uncovered=uncovered,
                 sites=len(owned),
+                invalid=invalid,
             )
         )
     return forms
@@ -192,7 +195,7 @@ def _remember_baseline(baselines, cache_key, runner, command: Command, cwd: Path
     if cache_key in baselines:
         return
     baseline = runner.run(command, cwd, None)
-    if baseline.code != 0:
+    if baseline.code != 0 or baseline.timed_out:
         tail = "\n".join(baseline.output.splitlines()[-20:])
         baselines[cache_key] = (False, baseline.seconds, tail)
         return
@@ -229,7 +232,7 @@ def _apply_selected(
     if not ok:
         return _baseline_failure(file_key, command, tail)
     timeout = max(2.0, seconds * timeout_factor)
-    run_mutants(
+    failure = run_mutants(
         root,
         path,
         original,
@@ -242,7 +245,7 @@ def _apply_selected(
         file_key,
         outcomes,
     )
-    return None
+    return _baseline_failure(file_key, command, failure) if failure is not None else None
 
 
 def _statuses(found: list[Site], covered: dict[str, bool], outcomes: dict[str, str]) -> dict[str, str]:

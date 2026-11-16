@@ -151,7 +151,7 @@ def test_report_text_states_the_score_the_total_and_coverage():
     text = format_results([mixed])
     assert "50.0%" in next(line for line in text.splitlines() if "place" in line)
     total = next(line for line in text.splitlines() if line.startswith("Total"))
-    assert total.split() == ["Total", "1", "1", "0", "2", "50.0%"]
+    assert total.split() == ["Total", "1", "1", "0", "0", "2", "50.0%"]
 
     perfect = _form("demo", "place", "a.py", "d", killed=1)
     perfect_total = next(line for line in format_results([perfect]).splitlines() if line.startswith("Total"))
@@ -722,7 +722,7 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
         baselines={},
     )
     assert clock.timeouts[0] is None
-    assert clock.timeouts[1] == 300
+    assert [value for value in clock.timeouts if value is not None] == [300, 300]
 
     class Red:
         verbose = False
