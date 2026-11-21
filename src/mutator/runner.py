@@ -306,6 +306,10 @@ def _rust_plan(root: Path, source: Path) -> tuple[Command, Path]:
     return ["cargo", "test"], directory
 
 
+def _csharp_plan(root: Path, source: Path) -> tuple[Command, Path]:
+    return ["dotnet", "test"], root
+
+
 def _python_plan(root: Path, source: Path) -> tuple[Command, Path]:
     directory = _nearest_marker(source, root, ("pyproject.toml", "pytest.ini", "setup.cfg"))
     return _python_command(directory), directory
@@ -318,6 +322,7 @@ _PLANS = {
     "typescript": _typescript_plan,
     "rust": _rust_plan,
     "python": _python_plan,
+    "csharp": _csharp_plan,
 }
 
 

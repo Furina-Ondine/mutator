@@ -26,9 +26,13 @@ _BINARY = {
     "!==": "===",
     "&&": "||",
     "||": "&&",
-    "??": "||",
     "and": "or",
     "or": "and",
+}
+
+_BINARY_OVERRIDES: dict[str, dict[str, str | None]] = {
+    "go": {"/": None},
+    "typescript": {"??": "||"},
 }
 
 _BINARY_PARENTS = {
@@ -135,11 +139,8 @@ def _category(token: str) -> str:
 
 
 def _binary_mutant(language: str, token: str) -> str | None:
-    if language == "go" and token == "/":
-        return None
-    if token == "??" and language != "typescript":
-        return None
-    return _BINARY.get(token)
+    overrides = _BINARY_OVERRIDES.get(language, {})
+    return overrides.get(token, _BINARY.get(token))
 
 
 def _optional_mutant(node) -> str | None:
@@ -358,6 +359,10 @@ def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
     """Mutation sites in source order. Offsets are UTF-8 byte offsets."""
 
     crapper = ensure_crapper()
+    if language == "csharp":
+        data, units = crapper.languages.csharp.units_in_source(source, path)
+        return sorted((site for unit in units for site in discover_nodes(data, unit.nodes)),
+                      key=lambda site: (site.line, site.start, site.end))
     data = source.encode("utf-8")
     grammar = _grammar(language, path)
     _data, tree = crapper.languages.treesitter.parse(source, grammar)
@@ -367,6 +372,42 @@ def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
     else:
         _visit(tree.root_node, data, language, found)
     found.sort(key=lambda site: (site.line, site.start, site.end))
+    return found
+
+
+_CSHARP_BINARY = {"binary_expression", "and_pattern", "or_pattern", "relational_pattern"}
+_CSHARP_UNARY = {"prefix_unary_expression", "negated_pattern"}
+_CSHARP_NONEXECUTABLE = {"attribute_list", "parameter_list", "bracketed_parameter_list"}
+
+
+def _visit_csharp_token(node, data: bytes, found: list[RawSite]) -> None:
+    token = _text(data, node)
+    if node.type in {"true", "false"}:
+        _add(found, node, token, _BOOLEANS[token], "boolean")
+    _visit_constant(node, token, found)
+    if node.is_named:
+        return
+    parent = _parent_type(node)
+    if parent in _CSHARP_BINARY:
+        mutant = _binary_mutant("csharp", token)
+        if mutant is not None:
+            _add(found, node, token, mutant, _category(token))
+    if parent in _CSHARP_UNARY and token in {"!", "not", "-"}:
+        _add(found, node, token, "", "unary")
+
+
+def discover_nodes(data: bytes, nodes) -> list[RawSite]:
+    """Find C# sites in the syntax owned by one shared executable unit."""
+    found: list[RawSite] = []
+    pending = list(reversed(nodes))
+    while pending:
+        node = pending.pop()
+        if node.type in _CSHARP_NONEXECUTABLE:
+            continue
+        if node.child_count:
+            pending.extend(reversed(node.children))
+        else:
+            _visit_csharp_token(node, data, found)
     return found
 
 

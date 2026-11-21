@@ -1,6 +1,6 @@
 # mutator
 
-Mutation testing for Clojure, Java, Go, TypeScript, Rust, and Python. One run detects the language of each source file, applies that language's mutation rules, and writes the snapshot [uml-viewer](https://github.com/unclebob/uml-viewer) already reads.
+Mutation testing for Clojure, Java, Go, TypeScript, Rust, Python, and C#. One run detects the language of each source file, applies that language's mutation rules, and writes the snapshot [uml-viewer](https://github.com/unclebob/uml-viewer) already reads.
 
 Clojure follows [clj-mutate](https://github.com/unclebob/clj-mutate). Go follows [mutate4go](https://github.com/unclebob/mutate4go). Java follows [mutate4java](https://github.com/unclebob/mutate4java). TypeScript, Rust, and Python use the same decisions as Java, spelled in that language. Function names and namespaces come from [crapper](https://github.com/unclebob/crapper), which is what uml-viewer joins to `.metrics/crap.edn`.
 
@@ -123,6 +123,7 @@ Tokens inside strings, comments, and quoted Clojure forms are left alone. A repl
 | TypeScript | the Java set, plus `===`/`!==`, `??` to `||`, and `?.` to `.`. A call or index drops `?.` (`a?.()` becomes `a()`). `.js`, `.jsx`, `.mjs`, and `.cjs` use these rules. |
 | Rust | the Java set (`&&`/`||`, `!`, unary `-`). |
 | Python | the Java set, spelled `and`/`or`, `not`, and `True`/`False`. |
+| C# | arithmetic, comparison, Boolean and pattern operators, unary negation, and `0`/`1` in shared Tree-sitter member spans. |
 
 ## Tests and coverage
 
@@ -136,8 +137,13 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 | TypeScript | `npm test` | nearest `package.json` |
 | Rust | `cargo test` | nearest `Cargo.toml` |
 | Python | the project's `.venv` or `venv` Python running `pytest`, or `unittest discover` | nearest project file |
+| C# | `dotnet test` | project root |
 
 Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A file missing from the report is treated as uncovered, and the run says so.
+
+C# needs the companion Crapper with C# source support. Use
+`--use-existing-coverage` with an LCOV report, `--coverage-command` to
+produce it, or `--no-coverage` to run every site.
 
 Python environments use `Scripts/python.exe` on Windows and `bin/python` on
 Linux and macOS. Generated commands preserve argument boundaries. User-written

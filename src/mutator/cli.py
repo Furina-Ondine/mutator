@@ -54,7 +54,7 @@ def _skipped_directory_text() -> str:
 HELP = f"""\
 Usage: mutator [options] [path-or-filter ...]
 
-Discover mutation sites in Clojure, Java, Go, TypeScript, Rust, and Python,
+Discover mutation sites in Clojure, Java, C#, Go, TypeScript, Rust, and Python,
 run the project's tests against each one, and write `.metrics/mutate` for
 uml-viewer. Namespaces and function names are the ones crapper writes into
 `.metrics/crap.edn`.
@@ -366,15 +366,16 @@ def _changed_sources(root: Path, crapper) -> list[Path]:
         relative = path.relative_to(root_resolved)
         if not skip.isdisjoint(relative.parts):
             continue
-        if crapper.discover.language_of(path) is None:
-            continue
-        if crapper.discover.is_test_file(path):
+        if not _is_source(path, crapper):
             continue
         files.append(path)
     return files
 
 
 def _is_source(path: Path, crapper) -> bool:
+    production_source = getattr(crapper.discover, "is_production_source", None)
+    if production_source is not None:
+        return production_source(path)
     if crapper.discover.language_of(path) is None:
         return False
     return not crapper.discover.is_test_file(path)
