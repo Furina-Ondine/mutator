@@ -75,6 +75,55 @@ def test_lcov_does_not_let_a_shorter_path_steal_hits(tmp_path):
     assert covered_lines(tmp_path, short, "python") == {2}
 
 
+def _write_cobertura(report, filename):
+    report.parent.mkdir(parents=True, exist_ok=True)
+    report.write_text(
+        f'<coverage><class filename="{filename}"><lines>'
+        '<line number="1" hits="1"/></lines></class></coverage>',
+        encoding="utf-8",
+    )
+
+
+def test_line_reports_fall_back_to_cobertura_after_lcov(tmp_path):
+    source = tmp_path / "calc.py"
+    source.write_text("def calc(x):\n    return x + 1\n", encoding="utf-8")
+    _write_cobertura(tmp_path / "coverage/python.cobertura.xml", "calc.py")
+    assert covered_lines(tmp_path, source, "python") == {1}
+
+    report = tmp_path / "coverage/lcov.info"
+    report.write_text("SF:calc.py\nDA:2,1\nend_of_record\n", encoding="utf-8")
+    assert covered_lines(tmp_path, source, "python") == {2}
+
+
+def test_lcov_prefers_an_exact_absolute_path_over_a_mirror(tmp_path):
+    source = tmp_path / "src/calc.py"
+    source.parent.mkdir()
+    source.write_text("def calc(x):\n    return x + 1\n", encoding="utf-8")
+    report = tmp_path / "coverage/lcov.info"
+    report.parent.mkdir()
+    report.write_text(
+        f"SF:{source.as_posix()}\nDA:1,1\nend_of_record\n"
+        "SF:/mirror/src/calc.py\nDA:2,1\nend_of_record\n",
+        encoding="utf-8",
+    )
+    assert covered_lines(tmp_path, source, "python") == {1}
+
+
+def test_cobertura_coverage_uses_project_source_identity(tmp_path):
+    for directory in ("A", "B"):
+        path = tmp_path / directory / "Widget.cs"
+        path.parent.mkdir()
+        path.write_text("class Widget {}\n", encoding="utf-8")
+    report = tmp_path / "coverage/sample.cobertura.xml"
+
+    _write_cobertura(report, "Widget.cs")
+    assert covered_lines(tmp_path, tmp_path / "A/Widget.cs", "csharp") is None
+    assert covered_lines(tmp_path, tmp_path / "B/Widget.cs", "csharp") is None
+    _write_cobertura(report, "A/Widget.cs")
+    assert covered_lines(tmp_path, tmp_path / "A/Widget.cs", "csharp") == {1}
+    assert covered_lines(tmp_path, tmp_path / "B/Widget.cs", "csharp") is None
+
+
 def test_go_profile_does_not_cross_files(tmp_path):
     profile = tmp_path / "target" / "coverage" / "go" / "coverage.out"
     profile.parent.mkdir(parents=True)

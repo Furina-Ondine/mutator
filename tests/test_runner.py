@@ -144,7 +144,7 @@ def test_a_go_package_path_is_one_argument(tmp_path):
     source = package / "widget.go"
     source.write_text("package main\nfunc Run() int { return 1 }\n", encoding="utf-8")
     command, directory = plan_command(root, source, "go", None)
-    assert command == ["go", "test", "-count=1", "./a;echo no"]
+    assert command == ["go", "test", "-json", "-count=1", "./a;echo no"]
     assert directory == root
     echoed = CommandRunner().run([sys.executable, "-c", "import sys; print(sys.argv[1])", command[-1]], directory, None)
     assert echoed.code == 0
@@ -154,10 +154,19 @@ def test_a_go_package_path_is_one_argument(tmp_path):
     spaced.parent.mkdir()
     spaced.write_text("package main\nfunc Run() int { return 1 }\n", encoding="utf-8")
     command, _directory = plan_command(root, spaced, "go", None)
-    assert command == ["go", "test", "-count=1", "./my dir"]
+    assert command == ["go", "test", "-json", "-count=1", "./my dir"]
     override, override_dir = plan_command(root, source, "go", "go test ./...")
     assert override == "go test ./..."
     assert override_dir == root.resolve()
+
+
+def test_native_diagnostics_preserve_unicode_paths(tmp_path, monkeypatch):
+    monkeypatch.setattr("mutator.runner.locale.getencoding", lambda: "cp936")
+    output = "src/中文/Example.java:[3,62]\r\n".encode("cp936")
+    script = f"import sys; sys.stderr.buffer.write({output!r}); sys.exit(1)"
+    result = CommandRunner().run([sys.executable, "-c", script], tmp_path, None)
+    assert result.code == 1
+    assert result.output == "src/中文/Example.java:[3,62]\n"
 
 
 def test_a_worker_overlay_is_imported_ahead_of_the_environment(tmp_path):

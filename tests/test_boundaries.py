@@ -46,6 +46,7 @@ from mutator.functions import (
     mutation_file,
 )
 from mutator.metrics import (
+    OUTCOME_POLICY_REVISION,
     _drop_stale,
     _form_file,
     _form_file_only,
@@ -151,7 +152,7 @@ def test_report_text_states_the_score_the_total_and_coverage():
     text = format_results([mixed])
     assert "50.0%" in next(line for line in text.splitlines() if "place" in line)
     total = next(line for line in text.splitlines() if line.startswith("Total"))
-    assert total.split() == ["Total", "1", "1", "0", "2", "50.0%"]
+    assert total.split() == ["Total", "1", "1", "0", "0", "2", "50.0%"]
 
     perfect = _form("demo", "place", "a.py", "d", killed=1)
     perfect_total = next(line for line in format_results([perfect]).splitlines() if line.startswith("Total"))
@@ -321,7 +322,7 @@ def test_commands_follow_the_nearest_project_and_a_killed_process(tmp_path):
     rust.write_text("fn place() -> i32 { 1 }\n", encoding="utf-8")
     command, directory = command_for(root, rust, "rust", None)
     assert directory == sub
-    assert command == ["cargo", "test"]
+    assert command == ["cargo", "test", "--message-format=json"]
 
     (sub / "go.mod").write_text("module example.com/demo\n", encoding="utf-8")
     go = sub / "pkg" / "widget.go"
@@ -329,7 +330,7 @@ def test_commands_follow_the_nearest_project_and_a_killed_process(tmp_path):
     go.write_text("package pkg\nfunc Run() int { return 1 }\n", encoding="utf-8")
     command, directory = command_for(root, go, "go", None)
     assert directory == sub
-    assert command == ["go", "test", "-count=1", "./pkg"]
+    assert command == ["go", "test", "-json", "-count=1", "./pkg"]
 
     (sub / "pyproject.toml").write_text("[project]\ndependencies=['pytest']\n", encoding="utf-8")
     python = sub / "app.py"
@@ -651,18 +652,18 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
     }
     monkeypatch.setattr("mutator.engine.form_spans", lambda *args: spans)
     monkeypatch.setattr("mutator.engine.form_digests", lambda *args: {key: "d" for key in spans})
-    ordered = _forms("x", path, tmp_path, "src/demo.py", [], {}, {}, None)
+    ordered = _forms("x", path, tmp_path, "src/demo.py", [], {}, {})
     assert [form.name for form in ordered] == ["long", "short"]
 
     owned = _site(namespace="demo", form_id="defn/place", mutation_id="m", line=2)
     place_span = {("demo", "defn/place"): (1, 3, "place", False)}
     monkeypatch.setattr("mutator.engine.form_spans", lambda *args: place_span)
     monkeypatch.setattr("mutator.engine.form_digests", lambda *args: {("demo", "defn/place"): "d"})
-    counted = _forms("x", path, tmp_path, "src/demo.py", [owned], {"m": True}, {"m": "survived"}, {2})
+    counted = _forms("x", path, tmp_path, "src/demo.py", [owned], {"m": True}, {"m": "survived"})
     assert counted[0].survived == 1
     assert counted[0].killed == 0
-    missing = _forms("x", path, tmp_path, "src/demo.py", [owned], {"m": True}, {}, None)
-    assert missing[0].survived == 1
+    missing = _forms("x", path, tmp_path, "src/demo.py", [owned], {"m": True}, {})
+    assert missing[0].survived == 0
 
     history = History(
         forms={("demo", "defn/place"): PriorForm("demo", "defn/place", "old", "src/demo.py")},
@@ -722,7 +723,8 @@ def test_selection_coverage_and_timeouts_keep_their_boundaries(tmp_path, capsys,
         baselines={},
     )
     assert clock.timeouts[0] is None
-    assert clock.timeouts[1] == 300
+    assert clock.timeouts[1] is None
+    assert [timeout for timeout in clock.timeouts if timeout is not None] == [300, 300]
 
     class Red:
         verbose = False
@@ -852,7 +854,7 @@ def test_an_unrelated_snapshot_is_left_in_place(tmp_path):
 
 
 def test_snapshots_keep_other_files_empty_directories_and_odd_records(tmp_path):
-    assert _outcomes_of({"outcomes": {"id": ":killed"}}) == {"id": "killed"}
+    assert _outcomes_of({"outcome-policy": OUTCOME_POLICY_REVISION, "outcomes": {"id": ":killed"}}) == {"id": "killed"}
     assert _form_file({"file": ""}, {"source": "a.go"}) == "a.go"
     assert _mentions_file({"forms": [{"file": "a.go"}]}, "a.go") is True
     assert _mentions_file({"forms": [{"file": "b.go"}]}, "a.go") is False
@@ -887,6 +889,7 @@ def test_snapshots_keep_other_files_empty_directories_and_odd_records(tmp_path):
             {
                 "namespace": "demo",
                 "source": "a.go",
+                "outcome-policy": OUTCOME_POLICY_REVISION,
                 "forms": [
                     {"id": "defn/m", "file": "b.go", "hash": "m"},
                     {"id": "defn/a", "file": "b.go", "line": 1, "hash": "a"},

@@ -2,7 +2,8 @@
 
 Java uses JaCoCo source lines. Go uses statement profiles, which name a
 file by its module import path, the way crapper names it. Clojure prefers
-Cloverage's per-line form counts, then LCOV. The other languages use LCOV.
+Cloverage's per-line form counts, then LCOV or Cobertura. The other
+languages use LCOV or Cobertura.
 A file that does not appear in a report has no coverage data.
 """
 
@@ -230,4 +231,15 @@ def covered_lines(root: Path, source_path: Path, language: str) -> set[int] | No
         html = _covered_from_pairs(_lookup(bundle.form_html, path))
         if html is not None:
             return html
-    return _covered_from_pairs(_lookup(bundle.lcov, path))
+    line_record_for = getattr(bundle, "line_record_for", None)
+    if line_record_for is None:
+        return _covered_from_pairs(_lookup(bundle.lcov, path))
+    if not (bundle.lcov or bundle.cobertura):
+        return None
+    boundary = root.resolve()
+    bundle.bind_sources([
+        file.as_posix()
+        for file in crapper.discover.iter_source_files([boundary])
+        if file.is_relative_to(boundary)
+    ])
+    return _covered_from_pairs(line_record_for(path))

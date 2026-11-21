@@ -1,9 +1,7 @@
-"""Run mutants in private overlays, with links when the platform permits them.
+"""Run mutants in verified worker directories.
 
-Each worker is a directory under target/mutation-workers. Project files are
-linked in. The file under test is a private copy, so workers can mutate it at
-the same time without touching the original tree. The overlay is removed when
-the file's mutants finish.
+Overlay workers link project files when the platform permits it. Isolated
+workers copy the project to a temporary directory outside the original tree.
 """
 
 from __future__ import annotations
@@ -14,14 +12,16 @@ import re
 import shutil
 import stat
 import sys
+import tempfile
+import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
-from queue import Empty, Queue
 from threading import Lock
 
-from mutator.model import Site
-from mutator.runner import Command
+from mutator.model import MutationRunFailure, Site
+from mutator.outcomes import classify_mutant
+from mutator.runner import CommandResult, TestPlan
 from mutator.sites import apply_site
 
 # Build output and the worker tree itself must not be shared. A link to
@@ -83,7 +83,13 @@ def worker_count(site_count: int, requested: int | None) -> int:
     return max(1, min(site_count, processors, limit))
 
 
-def new_run_dir(root: Path) -> Path:
+def new_run_dir(root: Path, *, isolated: bool = False) -> Path:
+    if isolated:
+        parent = Path(tempfile.gettempdir()).resolve() / "mutation-workers"
+        if parent.resolve().is_relative_to(root.resolve()):
+            raise ValueError(f"Temporary worker directory is inside the original project: {parent}")
+        parent.mkdir(parents=True, exist_ok=True)
+        return Path(tempfile.mkdtemp(prefix="run-", dir=parent))
     directory = root / "target" / "mutation-workers" / f"run-{uuid.uuid4()}"
     directory.mkdir(parents=True)
     return directory
@@ -102,9 +108,30 @@ def symlink(link: Path, target: Path) -> None:
         _copy_tree(target, link, frozenset())
 
 
-def _copy_tree(source: Path, destination: Path, ancestors: frozenset[Path]) -> None:
-    """Copy dependencies without caches, build outputs, or directory-link cycles."""
+def _filesystem_path(path: Path) -> Path:
+    """Use Windows extended paths for filesystem operations."""
 
+    if os.name != "nt":
+        return path
+    absolute = str(path.absolute())
+    if absolute.startswith("\\\\?\\"):
+        return Path(absolute)
+    if absolute.startswith("\\\\"):
+        return Path("\\\\?\\UNC\\" + absolute[2:])
+    return Path("\\\\?\\" + absolute)
+
+
+def _copy_tree(
+    source: Path,
+    destination: Path,
+    ancestors: frozenset[Path],
+    excluded_names: frozenset[str] = SKIP_LINK,
+    omitted: Path | None = None,
+) -> None:
+    source = _filesystem_path(source)
+    destination = _filesystem_path(destination)
+    if source == omitted:
+        return
     if not source.is_dir():
         shutil.copy2(source, destination)
         return
@@ -114,22 +141,41 @@ def _copy_tree(source: Path, destination: Path, ancestors: frozenset[Path]) -> N
     destination.mkdir(parents=True, exist_ok=True)
     ancestors = ancestors | {resolved}
     for child in source.iterdir():
-        if child.name not in SKIP_LINK:
-            _copy_tree(child, destination / child.name, ancestors)
+        if child.name not in excluded_names:
+            _copy_tree(child, destination / child.name, ancestors, excluded_names, omitted)
+
+
+def _remove_directory(path: Path) -> None:
+    # Windows can briefly retain a child's working directory after killing it.
+    deadline = time.monotonic() + 2
+    while True:
+        try:
+            path.rmdir()
+            return
+        except OSError as error:
+            if getattr(error, "winerror", None) != 32 or time.monotonic() >= deadline:
+                raise
+            time.sleep(0.01)
 
 
 def delete_tree(path: Path) -> None:
     """Remove a worker tree without following a link into the real project."""
 
-    if path.is_symlink():
+    path = _filesystem_path(path)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return
+    if stat.S_ISLNK(info.st_mode):
         path.unlink()
         return
-    if not path.exists():
+    if os.name == "nt" and getattr(info, "st_reparse_tag", None) == stat.IO_REPARSE_TAG_MOUNT_POINT:
+        _remove_directory(path)
         return
-    if path.is_dir():
-        for child in list(path.iterdir()):
+    if stat.S_ISDIR(info.st_mode):
+        for child in path.iterdir():
             delete_tree(child)
-        path.rmdir()
+        _remove_directory(path)
         return
     try:
         path.unlink()
@@ -297,8 +343,19 @@ def _overlay(worker: Path, root: Path, relative: str, original: bytes) -> None:
 
 
 def create_workers(
-    base: Path, root: Path, relative: str, original: bytes, count: int
+    base: Path, root: Path, relative: str, original: bytes, count: int, *, isolated: bool = False,
 ) -> list[Path]:
+    if isolated:
+        omitted = _filesystem_path(root / "target" / "mutation-workers")
+        created = []
+        for index in range(count):
+            worker = base / f"worker-{index}"
+            _copy_tree(root, worker, frozenset(), frozenset(), omitted)
+            target = _filesystem_path(worker / relative)
+            target.chmod(target.stat().st_mode | stat.S_IWUSR)
+            target.write_bytes(original)
+            created.append(worker)
+        return created
     created = []
     first = relative.split("/", 1)[0]
     importers = importers_of(root, relative)
@@ -315,124 +372,118 @@ def create_workers(
 
 
 def mapped_cwd(worker: Path, root: Path, cwd: Path) -> Path:
-    try:
-        relative = cwd.resolve().relative_to(root.resolve())
-    except ValueError:
-        return worker
-    return (worker / relative).resolve()
+    relative = cwd.resolve().relative_to(root.resolve())
+    mapped = (worker / relative).resolve()
+    if not mapped.is_relative_to(worker.resolve()):
+        raise ValueError(f"The command would run outside worker {worker}: {mapped}")
+    return mapped
 
 
 def _execute(
     directory: Path,
     site: Site,
-    root: Path,
+    cwd: Path,
     relative: str,
     original: bytes,
     runner,
-    command: Command,
-    cwd: Path,
+    plan: TestPlan,
     timeout: float,
     file_key: str,
-) -> str:
-    current = original[site.start : site.end].decode("utf-8")
-    if current != site.original:
-        print(
-            f"Skipped {file_key}:{site.line} {site.description}; source bytes moved",
-            file=sys.stderr,
-        )
-        return "survived"
-    destination = directory / relative
+) -> str | MutationRunFailure:
+    label = f"{file_key}:{site.line} {site.description}"
+    if original[site.start : site.end] != site.original.encode("utf-8"):
+        return MutationRunFailure("mutant", f"Cannot apply {label}: source bytes moved.")
+    mutant_path = directory / relative
+    destination = _filesystem_path(mutant_path)
     mutated = apply_site(original.decode("utf-8"), site.start, site.end, site.mutant)
-    destination.write_bytes(mutated.encode("utf-8"))
     try:
-        result = runner.run(command, mapped_cwd(directory, root, cwd), timeout)
+        destination.write_bytes(mutated.encode("utf-8"))
+        result = runner.run(plan.command, cwd, timeout)
     finally:
         destination.write_bytes(original)
-    if result.timed_out or result.code != 0:
-        return "killed"
-    return "survived"
-
-
-def _drain(
-    directory: Path,
-    pending: Queue,
-    lock: Lock,
-    outcomes: dict[str, str],
-    root: Path,
-    relative: str,
-    original: bytes,
-    runner,
-    command: Command,
-    cwd: Path,
-    timeout: float,
-    file_key: str,
-) -> None:
-    while True:
-        try:
-            site = pending.get_nowait()
-        except Empty:
-            return
-        if runner.verbose:
-            with lock:
-                _report(file_key, site)
-        status = _execute(
-            directory,
-            site,
-            root,
-            relative,
-            original,
-            runner,
-            command,
-            cwd,
-            timeout,
-            file_key,
+    status = classify_mutant(plan, result, cwd, mutant_path, worker_root=directory)
+    if status == "error":
+        return MutationRunFailure(
+            "mutant", _command_failure(f"Cannot classify mutant {label}", cwd, result)
         )
-        with lock:
-            outcomes[site.mutation_id] = status
+    return status
 
 
-def _report(file_key: str, site: Site) -> None:
-    print(f"{file_key}:{site.line} {site.description}", file=sys.stderr)
+def _command_failure(label: str, cwd: Path, result: CommandResult) -> str:
+    reason = f"exit code {result.code}"
+    if result.spawn_failed:
+        reason = "could not start command"
+    elif result.timed_out:
+        reason = "timed out"
+    detail = "\n".join(result.output.splitlines()[-20:])
+    message = f"{label} in {cwd}: {reason}"
+    return f"{message}\n{detail}" if detail else message
 
 
 def _run_all(
-    directories: list[Path],
+    workers: list[tuple[Path, Path]],
     sites: list[Site],
     outcomes: dict[str, str],
-    root: Path,
     relative: str,
     original: bytes,
     runner,
-    command: Command,
-    cwd: Path,
+    plan: TestPlan,
     timeout: float,
     file_key: str,
-) -> None:
-    pending: Queue = Queue()
-    for site in sites:
-        pending.put(site)
+) -> MutationRunFailure | None:
+    pending = iter(sites)
     lock = Lock()
-    with ThreadPoolExecutor(max_workers=len(directories)) as pool:
-        futures = [
-            pool.submit(
-                _drain,
-                directory,
-                pending,
-                lock,
-                outcomes,
-                root,
-                relative,
-                original,
-                runner,
-                command,
-                cwd,
-                timeout,
-                file_key,
-            )
-            for directory in directories
-        ]
-        for future in futures:
-            future.result()
+    failure = None
+
+    def drain(worker: tuple[Path, Path]) -> None:
+        nonlocal failure
+        directory, cwd = worker
+        while True:
+            with lock:
+                if failure is not None:
+                    return
+                site = next(pending, None)
+                if site is None:
+                    return
+                if runner.verbose:
+                    print(f"{file_key}:{site.line} {site.description}", file=sys.stderr)
+            try:
+                status = _execute(directory, site, cwd, relative, original, runner, plan, timeout, file_key)
+            except (OSError, RuntimeError, ValueError) as error:
+                status = MutationRunFailure("mutant", f"{file_key}:{site.line} {site.description}: {error}")
+            with lock:
+                if isinstance(status, MutationRunFailure):
+                    if failure is None:
+                        failure = status
+                    return
+                outcomes[site.mutation_id] = status
+
+    with ThreadPoolExecutor(max_workers=len(workers)) as pool:
+        list(pool.map(drain, workers))
+    return failure
+
+
+def _worker_baseline(
+    workers: list[tuple[Path, Path]], relative: str, original: bytes, runner, plan: TestPlan,
+) -> MutationRunFailure | None:
+    for directory, cwd in workers:
+        result = runner.run(plan.command, cwd, None)
+        if result.code != 0 or result.timed_out or result.spawn_failed:
+            return MutationRunFailure("worker-baseline", _command_failure("Worker baseline failed", cwd, result))
+        if _filesystem_path(directory / relative).read_bytes() != original:
+            return MutationRunFailure("worker-baseline", f"Worker baseline changed {relative} in {directory}.")
+    return None
+
+
+def _cleanup_workers(base: Path, stage: str, failure: MutationRunFailure | None) -> MutationRunFailure | None:
+    try:
+        delete_tree(base)
+    except OSError as error:
+        detail = f"Cannot remove worker directory {base}: {error}"
+        if failure is None:
+            return MutationRunFailure(stage, detail)
+        return MutationRunFailure(failure.stage, f"{failure.message}\n{detail}")
+    return failure
 
 
 def run_mutants(
@@ -442,34 +493,35 @@ def run_mutants(
     sites: list[Site],
     max_workers: int | None,
     runner,
-    command: Command,
-    cwd: Path,
+    plan: TestPlan,
     timeout: float,
     file_key: str,
     outcomes: dict[str, str],
-) -> None:
-    """Mutate ``sites`` in parallel overlays of ``root``. The source stays put."""
+) -> MutationRunFailure | None:
+    """Verify every worker, then run mutants and publish complete outcomes."""
 
     if not sites:
-        return
-    base = new_run_dir(root)
+        return None
+    base = None
+    failure = None
+    stage = "worker-baseline"
+    tested = {}
     try:
+        base = new_run_dir(root, isolated=plan.isolate)
         relative = source.resolve().relative_to(root.resolve()).as_posix()
         directories = create_workers(
-            base, root, relative, original, worker_count(len(sites), max_workers)
+            base, root, relative, original, worker_count(len(sites), max_workers), isolated=plan.isolate,
         )
-        _run_all(
-            directories,
-            sites,
-            outcomes,
-            root,
-            relative,
-            original,
-            runner,
-            command,
-            cwd,
-            timeout,
-            file_key,
-        )
+        workers = [(directory, mapped_cwd(directory, root, plan.cwd)) for directory in directories]
+        failure = _worker_baseline(workers, relative, original, runner, plan)
+        if failure is None:
+            stage = "mutant"
+            failure = _run_all(workers, sites, tested, relative, original, runner, plan, timeout, file_key)
+    except (OSError, RuntimeError, ValueError) as error:
+        failure = MutationRunFailure(stage, f"Worker execution failed for {file_key}: {error}")
     finally:
-        delete_tree(base)
+        if base is not None:
+            failure = _cleanup_workers(base, stage, failure)
+    if failure is None:
+        outcomes.update(tested)
+    return failure

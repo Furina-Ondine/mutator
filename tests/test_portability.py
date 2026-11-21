@@ -10,6 +10,7 @@ import pytest
 
 from mutator.model import Site
 from mutator.runner import CommandResult, CommandRunner, _python_command, display_command
+from mutator.runner import TestPlan as Plan
 from mutator.workers import create_workers, delete_tree, new_run_dir, run_mutants, symlink
 
 
@@ -109,11 +110,16 @@ def test_mutations_preserve_crlf_and_utf8_bytes(tmp_path):
         verbose = False
 
         def run(self, command, cwd, timeout):
-            assert (cwd / "demo.py").read_bytes() == original.replace(b"+", b"-")
+            actual = (cwd / "demo.py").read_bytes()
+            if timeout is None:
+                assert actual == original
+                return CommandResult(0, False, 0.01, "")
+            assert actual == original.replace(b"+", b"-")
             return CommandResult(1, False, 0.01, "")
 
     outcomes = {}
-    run_mutants(tmp_path, source, original, [site], 1, CheckBytes(), ["unused"], tmp_path, 5, "demo.py", outcomes)
+    plan = Plan(["unused"], tmp_path, "exit-code", False)
+    assert run_mutants(tmp_path, source, original, [site], 1, CheckBytes(), plan, 5, "demo.py", outcomes) is None
     assert outcomes == {"one": "killed"}
     assert source.read_bytes() == original
 

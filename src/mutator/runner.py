@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import locale
 import os
 import re
 import shlex
@@ -22,6 +23,15 @@ class CommandResult:
     timed_out: bool
     seconds: float
     output: str
+    spawn_failed: bool = False
+
+
+@dataclass(frozen=True)
+class TestPlan:
+    command: Command
+    cwd: Path
+    evidence: str
+    isolate: bool
 
 
 def _worker_home(cwd: Path) -> Path | None:
@@ -140,9 +150,6 @@ def _spawn(command: Command, cwd: Path, environment: dict):
             stderr=subprocess.STDOUT,
             start_new_session=os.name != "nt",
             creationflags=4 if job is not None else 0,  # CREATE_SUSPENDED
-            text=True,
-            encoding="utf-8",
-            errors="replace",
             env=environment,
         )
         if job is not None:
@@ -159,6 +166,16 @@ def _spawn(command: Command, cwd: Path, environment: dict):
                 finally:
                     process.communicate()
         raise
+
+
+def _decode_output(output: bytes | str | None) -> str:
+    if isinstance(output, bytes):
+        try:
+            output = output.decode("utf-8")
+        except UnicodeDecodeError:
+            # Native Windows tools can report diagnostics in the system encoding.
+            output = output.decode(locale.getencoding(), errors="replace")
+    return (output or "").replace("\r\n", "\n").replace("\r", "\n")
 
 
 class CommandRunner:
@@ -181,12 +198,14 @@ class CommandRunner:
         environment["PYTHONDONTWRITEBYTECODE"] = "1"
         environment["PYTHONUTF8"] = "1"
         environment["PYTHONIOENCODING"] = "utf-8"
+        # VSTest and MSBuild summaries are parsed for .NET mutation outcomes.
+        environment["DOTNET_CLI_UI_LANGUAGE"] = "en-US"
         _prefer_worker_sources(cwd, environment)
         try:
             process, job = _spawn(command, cwd, environment)
         except OSError as exc:
             seconds = time.monotonic() - started
-            return CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc))
+            return CommandResult(code=127, timed_out=False, seconds=seconds, output=str(exc), spawn_failed=True)
         try:
             output, _err = process.communicate(timeout=timeout)
             code = process.returncode if process.returncode is not None else 1
@@ -200,7 +219,7 @@ class CommandRunner:
             if job is not None:
                 job.close()
         seconds = time.monotonic() - started
-        return CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=output or "")
+        return CommandResult(code=code, timed_out=timed_out, seconds=seconds, output=_decode_output(output))
 
 
 def nearest(start: Path, marker: str, stop: Path) -> Path | None:
@@ -293,7 +312,7 @@ def _java_plan(root: Path, source: Path) -> tuple[Command, Path]:
 
 def _go_plan(root: Path, source: Path) -> tuple[Command, Path]:
     directory = _nearest_marker(source, root, ("go.mod",))
-    return ["go", "test", "-count=1", _go_package(directory, source)], directory
+    return ["go", "test", "-json", "-count=1", _go_package(directory, source)], directory
 
 
 def _typescript_plan(root: Path, source: Path) -> tuple[Command, Path]:
@@ -303,7 +322,7 @@ def _typescript_plan(root: Path, source: Path) -> tuple[Command, Path]:
 
 def _rust_plan(root: Path, source: Path) -> tuple[Command, Path]:
     directory = _nearest_marker(source, root, ("Cargo.toml",))
-    return ["cargo", "test"], directory
+    return ["cargo", "test", "--message-format=json"], directory
 
 
 def _csharp_plan(root: Path, source: Path) -> tuple[Command, Path]:
@@ -325,6 +344,22 @@ _PLANS = {
     "csharp": _csharp_plan,
 }
 
+_COMPILED_EVIDENCE = {"java": "maven", "go": "go", "rust": "cargo", "csharp": "dotnet"}
+
+
+def resolve_test_plan(root: Path, source: Path, language: str, override: str | None) -> TestPlan:
+    root = root.resolve()
+    language_plan = _PLANS.get(language)
+    if override:
+        command, directory = override, root
+    elif language_plan is None:
+        command, directory = ["false"], root
+    else:
+        command, directory = language_plan(root, source)
+    evidence = _COMPILED_EVIDENCE.get(language, "exit-code")
+    isolate = language in _COMPILED_EVIDENCE or language == "typescript"
+    return TestPlan(command, directory, evidence, isolate)
+
 
 def test_plan(root: Path, source: Path, language: str, override: str | None) -> tuple[Command, Path]:
     """The test command and the directory it runs in.
@@ -333,10 +368,5 @@ def test_plan(root: Path, source: Path, language: str, override: str | None) -> 
     argument vector, so a package path is one argument.
     """
 
-    root = root.resolve()
-    if override:
-        return override, root
-    plan = _PLANS.get(language)
-    if plan is None:
-        return ["false"], root
-    return plan(root, source)
+    plan = resolve_test_plan(root, source, language, override)
+    return plan.command, plan.cwd
