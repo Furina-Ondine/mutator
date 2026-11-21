@@ -30,9 +30,24 @@ _BINARY = {
     "or": "and",
 }
 
+_BITWISE = {"&": "|", "|": "&", "<<": ">>", ">>": "<<"}
+_CSHARP_BINARY = {"%": "/", **_BITWISE}
+
 _BINARY_OVERRIDES: dict[str, dict[str, str | None]] = {
+    "csharp": _CSHARP_BINARY,
     "go": {"/": None},
     "typescript": {"??": "||"},
+}
+
+_UPDATE = {"++": "--", "--": "++"}
+_CSHARP_TOKEN_RULES = {
+    **{token: (replacement, "update") for token, replacement in _UPDATE.items()},
+    **{
+        token + "=": (_BINARY[token] + "=", "assignment")
+        for token in ("+", "-", "*", "/")
+    },
+    "%=": (_CSHARP_BINARY["%"] + "=", "assignment"),
+    "??=": ("=", "assignment"),
 }
 
 _BINARY_PARENTS = {
@@ -135,6 +150,8 @@ def _category(token: str) -> str:
         return "equality"
     if token in {"&&", "||", "??", "and", "or"}:
         return "logical"
+    if token in _BITWISE:
+        return "bitwise"
     return "arithmetic"
 
 
@@ -182,7 +199,8 @@ def _is_statement(node_type: str) -> bool:
 def _statement_line(node) -> int:
     current = node.parent
     while current is not None:
-        if _is_statement(current.type):
+        roles = getattr(current, "roles", ())
+        if "statement" in roles or "declaration" in roles or _is_statement(current.type):
             return current.start_point[0] + 1
         current = current.parent
     return node.start_point[0] + 1
@@ -375,25 +393,46 @@ def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
     return found
 
 
-_CSHARP_BINARY = {"binary_expression", "and_pattern", "or_pattern", "relational_pattern"}
-_CSHARP_UNARY = {"prefix_unary_expression", "negated_pattern"}
-_CSHARP_NONEXECUTABLE = {"attribute_list", "parameter_list", "bracketed_parameter_list"}
+def _csharp_operator(parent, token: str) -> tuple[str, str] | None:
+    if "binary" in parent.roles:
+        mutant = _binary_mutant("csharp", token)
+        return (mutant, _category(token)) if mutant is not None else None
+    if "unary" in parent.roles and token in {"!", "not", "-", "~"}:
+        return "", "unary"
+    return _CSHARP_TOKEN_RULES.get(token)
 
 
 def _visit_csharp_token(node, data: bytes, found: list[RawSite]) -> None:
     token = _text(data, node)
-    if node.type in {"true", "false"}:
+    if "boolean" in node.roles:
         _add(found, node, token, _BOOLEANS[token], "boolean")
-    _visit_constant(node, token, found)
-    if node.is_named:
-        return
-    parent = _parent_type(node)
-    if parent in _CSHARP_BINARY:
-        mutant = _binary_mutant("csharp", token)
-        if mutant is not None:
-            _add(found, node, token, mutant, _category(token))
-    if parent in _CSHARP_UNARY and token in {"!", "not", "-"}:
-        _add(found, node, token, "", "unary")
+    if "number" in node.roles and token in {"0", "1"}:
+        _add(found, node, token, _flip01(token), "constant")
+    if "operator" in node.roles:
+        rule = _csharp_operator(node.parent, token)
+        if rule is not None:
+            mutant, category = rule
+            _add(found, node, token, mutant, category)
+
+
+def _csharp_swapped_branches(node, data: bytes) -> str:
+    _, _, when_true, _, when_false = node.children
+    head = data[node.start_byte:when_true.start_byte]
+    separator = data[when_true.end_byte:when_false.start_byte]
+    return (head + when_false.text + separator + when_true.text).decode("utf-8")
+
+
+def _visit_csharp_expression(node, data: bytes, found: list[RawSite]) -> None:
+    if node.kind == "CoalesceExpression":
+        fallback = node.children[2]
+        # A throw expression is only allowed in specific contexts. For other
+        # fallbacks, parentheses preserve parsing even in return(null)??value.
+        if fallback.kind != "ThrowExpression":
+            _add(found, node, _text(data, node), f"({_text(data, fallback)})", "logical")
+    elif node.kind == "ConditionalExpression":
+        _add(found, node, _text(data, node), _csharp_swapped_branches(node, data), "conditional")
+    elif node.kind == "ConditionalAccessExpression":
+        _add(found, node.children[1], "?", "", "optional")
 
 
 def discover_nodes(data: bytes, nodes) -> list[RawSite]:
@@ -402,9 +441,10 @@ def discover_nodes(data: bytes, nodes) -> list[RawSite]:
     pending = list(reversed(nodes))
     while pending:
         node = pending.pop()
-        if node.type in _CSHARP_NONEXECUTABLE:
+        if "metadata" in node.roles or "type_scope" in node.roles:
             continue
-        if node.child_count:
+        if node.is_named:
+            _visit_csharp_expression(node, data, found)
             pending.extend(reversed(node.children))
         else:
             _visit_csharp_token(node, data, found)

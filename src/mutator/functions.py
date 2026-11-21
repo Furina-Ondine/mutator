@@ -12,6 +12,10 @@ from mutator.model import Site
 from mutator.sites import discover_nodes, discover_raw
 
 
+class CSharpAnalysisError(RuntimeError):
+    """C# source could not be analyzed in its SDK context."""
+
+
 def _lines(source: str) -> list[str]:
     return source.splitlines()
 
@@ -141,9 +145,11 @@ def _owner(functions, line: int, byte: int | None = None):
 
 
 def _csharp_units(source: str, path: Path, root: Path):
-    return ensure_crapper().languages.csharp.units_in_source(
-        source, path.resolve().as_posix(), root.resolve().as_posix()
-    )
+    reader = ensure_crapper().languages.csharp
+    try:
+        return reader.units_in_source(source, path.resolve().as_posix(), root.resolve().as_posix())
+    except (SyntaxError, RuntimeError) as error:
+        raise CSharpAnalysisError(str(error)) from error
 
 
 def _functions_and_privacy(source: str, path: Path, root: Path, language: str):
