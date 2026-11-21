@@ -17,7 +17,7 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/crapper
-          ref: ed883bd0f6ea42da6af397060ccf1eb5df62838e
+          ref: d605acc34f213d0c0fe7b8fb92a6b359ebc2ecd3
           path: crapper
       - uses: actions/setup-python@v5
         with:
