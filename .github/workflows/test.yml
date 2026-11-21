@@ -17,10 +17,14 @@ jobs:
       - uses: actions/checkout@v4
         with:
           repository: ${{ github.repository_owner }}/crapper
+          ref: b3e47fc12df0c30403374329fc1bbd77f3546f75
           path: crapper
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python }}
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: '10.0.x'
       - name: Install and test on Unix
         if: runner.os != 'Windows'
         working-directory: mutator
