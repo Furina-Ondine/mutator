@@ -9,7 +9,7 @@ from pathlib import Path
 
 from mutator.crapper_link import ensure_crapper
 from mutator.model import Site
-from mutator.sites import discover_raw
+from mutator.sites import discover_nodes, discover_raw
 
 
 def _lines(source: str) -> list[str]:
@@ -140,21 +140,42 @@ def _owner(functions, line: int, byte: int | None = None):
     return min(matches, key=lambda fn: (_tightness(fn), fn.start_line))
 
 
-def sites_in_file(source: str, path: Path, root: Path, file_key: str) -> list[Site]:
-    crapper = ensure_crapper()
-    language = crapper.discover.language_of(path)
-    if language is None:
-        return []
-    functions = project_functions(source, path, root)
-    privacy = {
-        id(fn): is_private(language, fn.name, source, fn.start_line, fn.end_line) for fn in functions
-    }
-    found: list[Site] = []
+def _csharp_units(source: str, path: Path, root: Path):
+    return ensure_crapper().languages.csharp.units_in_source(
+        source, path.resolve().as_posix(), root.resolve().as_posix()
+    )
+
+
+def _functions_and_privacy(source: str, path: Path, root: Path, language: str):
+    if language == "csharp":
+        _, units = _csharp_units(source, path, root)
+        return [(unit.function, unit.private) for unit in units]
+    return [(fn, is_private(language, fn.name, source, fn.start_line, fn.end_line))
+            for fn in project_functions(source, path, root)]
+
+
+def _owned_sites(source: str, path: Path, root: Path, language: str):
+    if language == "csharp":
+        data, units = _csharp_units(source, path, root)
+        for unit in units:
+            for raw in discover_nodes(data, unit.nodes):
+                yield unit.function, unit.private, raw
+        return
+    forms = _functions_and_privacy(source, path, root, language)
+    functions = [fn for fn, _ in forms]
+    privacy = {id(fn): private for fn, private in forms}
     for raw in discover_raw(source, language, path.as_posix()):
         owner = _owner(functions, raw.line, raw.start)
-        if owner is None:
-            continue
-        private = privacy[id(owner)]
+        if owner is not None:
+            yield owner, privacy[id(owner)], raw
+
+
+def sites_in_file(source: str, path: Path, root: Path, file_key: str) -> list[Site]:
+    language = ensure_crapper().discover.language_of(path)
+    if language is None:
+        return []
+    found: list[Site] = []
+    for owner, private, raw in _owned_sites(source, path, root, language):
         form = form_id(owner.name, private)
         found.append(
             Site(
@@ -174,7 +195,7 @@ def sites_in_file(source: str, path: Path, root: Path, file_key: str) -> list[Si
                 anchor_line=raw.anchor_line,
             )
         )
-    return found
+    return sorted(found, key=lambda site: (site.line, site.start, site.end))
 
 
 def form_digests(source: str, path: Path, root: Path) -> dict[tuple[str, str], str]:
@@ -185,8 +206,7 @@ def form_digests(source: str, path: Path, root: Path) -> dict[tuple[str, str], s
     if language is None:
         return {}
     grouped: dict[tuple[str, str], list] = {}
-    for fn in project_functions(source, path, root):
-        private = is_private(language, fn.name, source, fn.start_line, fn.end_line)
+    for fn, private in _functions_and_privacy(source, path, root, language):
         key = (fn.namespace, form_id(fn.name, private))
         grouped.setdefault(key, []).append(fn)
     digests = {}
@@ -203,8 +223,7 @@ def form_spans(source: str, path: Path, root: Path) -> dict[tuple[str, str], tup
     crapper = ensure_crapper()
     language = crapper.discover.language_of(path)
     spans = {}
-    for fn in project_functions(source, path, root):
-        private = is_private(language or "", fn.name, source, fn.start_line, fn.end_line)
+    for fn, private in _functions_and_privacy(source, path, root, language or ""):
         key = (fn.namespace, form_id(fn.name, private))
         if key not in spans:
             spans[key] = (fn.start_line, fn.end_line, fn.name, private)
