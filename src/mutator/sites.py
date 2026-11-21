@@ -26,7 +26,6 @@ _BINARY = {
     "!==": "===",
     "&&": "||",
     "||": "&&",
-    "??": "||",
     "and": "or",
     "or": "and",
 }
@@ -137,8 +136,8 @@ def _category(token: str) -> str:
 def _binary_mutant(language: str, token: str) -> str | None:
     if language == "go" and token == "/":
         return None
-    if token == "??" and language != "typescript":
-        return None
+    if language == "typescript" and token == "??":
+        return "||"
     return _BINARY.get(token)
 
 
@@ -181,7 +180,8 @@ def _is_statement(node_type: str) -> bool:
 def _statement_line(node) -> int:
     current = node.parent
     while current is not None:
-        if _is_statement(current.type):
+        roles = getattr(current, "roles", ())
+        if "statement" in roles or "declaration" in roles or _is_statement(current.type):
             return current.start_point[0] + 1
         current = current.parent
     return node.start_point[0] + 1
@@ -358,6 +358,10 @@ def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
     """Mutation sites in source order. Offsets are UTF-8 byte offsets."""
 
     crapper = ensure_crapper()
+    if language == "csharp":
+        data, units = crapper.languages.csharp.units_in_source(source, path)
+        return sorted((site for unit in units for site in discover_nodes(data, unit.nodes)),
+                      key=lambda site: (site.line, site.start, site.end))
     data = source.encode("utf-8")
     grammar = _grammar(language, path)
     _data, tree = crapper.languages.treesitter.parse(source, grammar)
@@ -368,6 +372,36 @@ def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
         _visit(tree.root_node, data, language, found)
     found.sort(key=lambda site: (site.line, site.start, site.end))
     return found
+
+
+def discover_nodes(data: bytes, nodes) -> list[RawSite]:
+    """Find C# sites in the syntax owned by one shared executable unit."""
+    found: list[RawSite] = []
+    pending = list(reversed(nodes))
+    while pending:
+        node = pending.pop()
+        if "metadata" in node.roles or "type_scope" in node.roles:
+            continue
+        if node.is_named:
+            pending.extend(reversed(node.children))
+        else:
+            _visit_csharp_token(node, data, found)
+    return found
+
+
+def _visit_csharp_token(node, data: bytes, found: list[RawSite]) -> None:
+    token = _text(data, node)
+    if "boolean" in node.roles:
+        _add(found, node, token, _BOOLEANS[token], "boolean")
+    if "number" in node.roles and token in {"0", "1"}:
+        _add(found, node, token, _flip01(token), "constant")
+    if "operator" not in node.roles:
+        return
+    parent = node.parent.roles
+    if "binary" in parent and token in _BINARY:
+        _add(found, node, token, _BINARY[token], _category(token))
+    if "unary" in parent and token in {"!", "not", "-"}:
+        _add(found, node, token, "", "unary")
 
 
 def apply_site(source: str, start: int, end: int, mutant: str) -> str:

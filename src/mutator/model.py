@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from typing import Literal
 
 
 @dataclass(frozen=True)
@@ -32,7 +33,7 @@ class Site:
 
 @dataclass
 class FormResult:
-    """Killed, survived, and uncovered totals for one operation."""
+    """Mutation outcomes and uncovered totals for one operation."""
 
     id: str
     namespace: str
@@ -46,6 +47,7 @@ class FormResult:
     survived: int = 0
     uncovered: int = 0
     sites: int = 0
+    invalid: int = 0
 
     @property
     def score(self) -> float | None:
@@ -71,6 +73,12 @@ class History:
     outcomes: dict[str, str] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class MutationRunFailure:
+    stage: Literal["worker-baseline", "mutant"]
+    message: str
+
+
 @dataclass
 class RunResult:
     path: str
@@ -81,3 +89,4 @@ class RunResult:
     baseline_failed: bool = False
     baseline_message: str = ""
     skipped: str = ""
+    execution_error: str = ""

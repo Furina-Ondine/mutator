@@ -224,6 +224,16 @@ def covered_lines(root: Path, source_path: Path, language: str) -> set[int] | No
     if language == "java":
         return _lookup(_jacoco_index(root), path)
     bundle = crapper.coverage.load_bundle(root)
+    if language == "csharp":
+        boundary = root.resolve()
+        bundle.bind_sources([
+            file.relative_to(boundary).as_posix()
+            for file in crapper.discover.iter_source_files([root])
+            if file.is_relative_to(boundary)
+        ])
+        source = source_path.resolve()
+        key = source.relative_to(boundary).as_posix() if source.is_relative_to(boundary) else path
+        return _covered_from_pairs(bundle.line_record_for(key))
     if language == "go":
         return _go_lines(root, bundle.go_profile, path)
     if language == "clojure":

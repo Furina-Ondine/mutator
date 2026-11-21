@@ -11,6 +11,7 @@ from pathlib import Path
 from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
 from mutator.engine import mutate_file, restore_backups, scan_file
+from mutator.functions import CSharpAnalysisError
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandRunner
 
@@ -54,7 +55,7 @@ def _skipped_directory_text() -> str:
 HELP = f"""\
 Usage: mutator [options] [path-or-filter ...]
 
-Discover mutation sites in Clojure, Java, Go, TypeScript, Rust, and Python,
+Discover mutation sites in Clojure, Java, C#, Go, TypeScript, Rust, and Python,
 run the project's tests against each one, and write `.metrics/mutate` for
 uml-viewer. Namespaces and function names are the ones crapper writes into
 `.metrics/crap.edn`.
@@ -75,9 +76,8 @@ Options:
                                 write metrics.
   --mutate-all                  Run every covered site, including ones the
                                 last snapshot already killed.
-  --since-last-run              Run survivors and sites in new or rewritten
-                                functions. This is the default when a snapshot
-                                exists.
+  --since-last-run              Retry survivors, invalid mutants, and sites
+                                without a verified kill. This is the default.
   --lines <n,n,...>             Run only mutations on these source lines.
   --no-coverage                 Treat every site as covered.
   --use-existing-coverage       Read coverage already on disk. Same as
@@ -107,20 +107,22 @@ Arguments:
 With no paths, source files under the project root are mutated. Directories
 named {_skipped_directory_text()} are skipped.
 
-The default, once a snapshot exists, reruns survivors and sites in functions
-whose text changed. Killed mutants in unchanged functions are kept.
+Verified kills in unchanged functions are reused. Older snapshots without
+verified outcomes are refreshed as their files are run.
 
 Selected mutants of one file run at the same time, one worker per core unless
---max-workers says otherwise. A worker is a private overlay under
-target/mutation-workers with its own copy of the mutated file. The project
-tree is left unchanged. A copy left under target/mutator-backup/ by an
-interrupted older run is restored before a non-scan run.
+--max-workers says otherwise. Each worker first passes the same test command
+with the original source. Java, Go, Rust, and C# use tool diagnostics to
+distinguish compiler errors from test failures. TypeScript runs the test command
+defined by the project. A copy left by an interrupted older run under
+target/mutator-backup/ is restored before a non-scan run.
 
 Exit codes:
   0  every executed mutant was killed, or there was nothing to run
   1  usage error
-  2  baseline tests failed
+  2  baseline or mutant execution failed
   3  at least one mutant survived
+  4  at least one mutant was invalid
 
 Coverage, when it is produced, uses the same commands as crapper:
   Clojure      clj -M:cov --lcov
@@ -360,15 +362,14 @@ def _positionals(root: Path, args: list[str]) -> tuple[list[Path], list[str]]:
 
 def _changed_sources(root: Path, crapper) -> list[Path]:
     skip = set(crapper.discover.SKIP_DIRS) | set(crapper.discover.TEST_DIRS)
+    production_source = getattr(crapper.discover, "is_production_source", None)
     root_resolved = root.resolve()
     files = []
     for path in _changed_files(root):
         relative = path.relative_to(root_resolved)
         if not skip.isdisjoint(relative.parts):
             continue
-        if crapper.discover.language_of(path) is None:
-            continue
-        if crapper.discover.is_test_file(path):
+        if not (production_source(path) if production_source else _is_source(path, crapper)):
             continue
         files.append(path)
     return files
@@ -509,18 +510,25 @@ def _record(result, forms: list, written: list[str]) -> str:
         return "skip"
     if result.baseline_failed:
         print(result.baseline_message, file=sys.stderr)
-        return "baseline"
+        return "error"
+    if result.execution_error:
+        print(result.execution_error, file=sys.stderr)
+        return "error"
     print(format_site_log(result.sites, result.statuses), end="")
     forms.extend(result.forms)
     written.extend(result.written)
+    if any(form.invalid for form in result.forms):
+        return "invalid"
     if any(form.survived for form in result.forms):
         return "survived"
     return "ok"
 
 
-def _finish(baseline_failed: bool, survived: bool) -> int:
-    if baseline_failed:
+def _finish(execution_failed: bool, survived: bool, invalid: bool = False) -> int:
+    if execution_failed:
         return 2
+    if invalid:
+        return 4
     if survived:
         return 3
     return 0
@@ -531,8 +539,9 @@ def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
     baselines: dict[tuple[tuple[str, ...], str], tuple[bool, float, str]] = {}
     forms = []
     written: list[str] = []
-    baseline_failed = False
+    execution_failed = False
     survived = False
+    invalid = False
     for path in files:
         result = mutate_file(
             path,
@@ -549,15 +558,17 @@ def _mutate_files(options: Options, root: Path, files: list[Path]) -> int:
             max_workers=options.max_workers,
         )
         outcome = _record(result, forms, written)
-        if outcome == "baseline":
-            baseline_failed = True
+        if outcome == "error":
+            execution_failed = True
         elif outcome == "survived":
             survived = True
+        elif outcome == "invalid":
+            invalid = True
     if forms:
         print(format_results(forms), end="")
     for path in written:
         print(f"Wrote {path}", file=sys.stderr)
-    return _finish(baseline_failed, survived)
+    return _finish(execution_failed, survived, invalid)
 
 
 def run(argv: list[str] | None = None) -> int:
@@ -582,9 +593,13 @@ def run(argv: list[str] | None = None) -> int:
     coverage = _prepare_coverage(options, root, files)
     if coverage != 0:
         return coverage
-    if options.scan:
-        return _scan(options, root, files)
-    return _mutate_files(options, root, files)
+    try:
+        if options.scan:
+            return _scan(options, root, files)
+        return _mutate_files(options, root, files)
+    except CSharpAnalysisError as exc:
+        print(exc, file=sys.stderr)
+        return 2
 
 
 def main(argv: list[str] | None = None) -> None:
