@@ -14,6 +14,9 @@ from mutator.edn import dumps, keyword, loads
 from mutator.functions import mutation_file, mutation_namespace
 from mutator.model import FormResult, History, PriorForm
 
+OUTCOME_POLICY_REVISION = 1
+_SCORED_OUTCOMES = frozenset({"killed", "survived", "invalid"})
+
 
 def _relative(path: Path, root: Path) -> str:
     return path.resolve().relative_to(root.resolve()).as_posix()
@@ -56,15 +59,19 @@ def _forms_of(data: dict) -> list[dict]:
 
 
 def _outcomes_of(data: dict) -> dict[str, str]:
+    # Older engines could record compiler or worker failures as test kills.
+    # Check each input snapshot before merging so a rewrite cannot validate it.
+    if data.get("outcome-policy") != OUTCOME_POLICY_REVISION:
+        return {}
     raw = data.get("outcomes")
     if not isinstance(raw, dict):
         return {}
     found = {}
     for key, value in raw.items():
-        if not isinstance(key, str):
+        if not isinstance(key, str) or not isinstance(value, str):
             continue
-        status = value[1:] if isinstance(value, str) and value.startswith(":") else value
-        if status in {"killed", "survived"}:
+        status = value.removeprefix(":")
+        if status in _SCORED_OUTCOMES:
             found[key] = status
     return found
 
@@ -131,12 +138,14 @@ def _render_form(form: FormResult) -> dict:
         "survived": form.survived,
         "uncovered": form.uncovered,
         "sites": form.sites,
+        "invalid": form.invalid,
     }
 
 
 def _render_snapshot(namespace: str, source: str, forms: list[dict], outcomes: dict[str, str]) -> str:
     payload = {
         "version": 1,
+        "outcome-policy": OUTCOME_POLICY_REVISION,
         "tested-at": datetime.now().astimezone().isoformat(timespec="seconds"),
         "source": source,
         "namespace": namespace,
@@ -173,7 +182,7 @@ def _file_outcomes(outcomes: dict[str, str], file_key: str) -> dict[str, str]:
     for mutation, status in outcomes.items():
         if mutation_file(mutation) != file_key:
             continue
-        if status not in {"killed", "survived"}:
+        if status not in _SCORED_OUTCOMES:
             continue
         found[mutation] = status
     return found

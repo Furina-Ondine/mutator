@@ -51,6 +51,7 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
         timeout_factor=10,
         mutation_warning=50,
         baselines={},
+        max_workers=1,
     )
     assert path.read_bytes() == original
     assert first.baseline_failed is False
@@ -82,11 +83,12 @@ def test_mutants_are_killed_or_kept_and_the_snapshot_is_differential(tmp_path):
         timeout_factor=10,
         mutation_warning=50,
         baselines={},
+        max_workers=1,
     )
     assert second.forms[0].killed == 1
     assert second.forms[0].survived == 3
-    # Baseline plus the three survivors. The killed mutant stays in the snapshot.
-    assert runner.calls - first_calls == 4
+    # Root and worker baselines plus the three surviving mutants.
+    assert runner.calls - first_calls == 5
 
 
 def test_uncovered_sites_are_not_executed(tmp_path):

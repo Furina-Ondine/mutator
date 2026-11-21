@@ -4,7 +4,11 @@ Mutation testing for Clojure, Java, Go, TypeScript, Rust, Python, and C#. One ru
 
 Clojure follows [clj-mutate](https://github.com/unclebob/clj-mutate). Go follows [mutate4go](https://github.com/unclebob/mutate4go). Java follows [mutate4java](https://github.com/unclebob/mutate4java). TypeScript, Rust, and Python use the same decisions as Java, spelled in that language. Function names and namespaces come from [crapper](https://github.com/unclebob/crapper), which is what uml-viewer joins to `.metrics/crap.edn`.
 
-A mutant is killed when the tests fail or time out. It survives when the tests still pass. A site on a line the coverage report does not hit is uncovered and is not run. The score uml-viewer paints is killed / (killed + survived).
+A mutant survives when the tests still pass. For Java, Go, Rust, and C#, a
+reported test failure kills the mutant and a compiler diagnostic for project
+source marks it invalid. A failed run without either kind of evidence stops the
+file and preserves its previous snapshot. Uncovered and invalid sites are
+excluded from the score, killed / (killed + survived).
 
 ## Run
 
@@ -47,17 +51,33 @@ The first run of a tree executes every covered mutant. Start with the file you a
 ./mutator --max-workers 3 src/demo/core.clj
 ```
 
-Once a snapshot exists, the next run is differential. It reruns survivors and every site in a function whose text changed. Killed mutants in an unchanged function stay killed. `--since-last-run` is that same selection. `--mutate-all` ignores it.
+Once a snapshot exists, the next run is differential. It reruns survivors,
+invalid sites and every site in a function whose text changed. Verified kills
+from unchanged functions are kept. Earlier snapshots with unverified outcomes
+are refreshed when their source files run again. `--since-last-run` is that
+same selection. `--mutate-all` ignores it.
 
-Exit `0` when every executed mutant was killed. Exit `2` when the baseline tests fail. Exit `3` when a mutant survives. A failed baseline does not rewrite the snapshot.
+Exit `0` when every executed mutant was killed or none ran. Exit `2` on a
+baseline or execution failure, `3` when a mutant survives, and `4` if a
+mutant is invalid.
 
 ## Workers
 
 Mutants of one file run at the same time. The default is one worker per core. `--max-workers` sets the cap. The run uses the smaller of that cap, the number of cores, and the number of selected sites. Files are still taken one at a time.
 
-Each worker is a directory under `target/mutation-workers`. The file being mutated is a private copy. A module that reaches that file through a relative import is copied too, so Node resolves the import to the private copy. The rest of the tree is linked where symlinks are available. Otherwise, dependencies are copied into each worker, excluding version control, virtualenvs, build outputs, and caches. Windows does not require administrator privileges or Developer Mode. Copying uses more disk space and setup time; `--max-workers` controls the number of concurrent copies. The original files stay as they are. The overlay is removed when that file's mutants finish.
+Java, Go, Rust, C#, and TypeScript use private workspace copies outside the
+original project. Each worker keeps the relative project layout and its
+own build inputs and outputs. Include the relevant projects in `--root`
+and use project-relative paths to write outputs into the worker. A test
+command with a hardcoded external output path still writes to that path.
+Other languages use the original overlays under `target/mutation-workers`.
+Windows workers support copying without symlink privileges.
 
-The baseline still runs once, in the real tree, before any worker starts. The mutant command then runs inside the worker, in the same directory it would have used in the real tree, so a relative path such as `src` or `./pkg` refers to the overlay. A copy left under `target/mutator-backup/` by an interrupted older run is restored before a non-scan run.
+The original checkout and every private worker must pass the same test
+command before mutations start. Mutants run in the corresponding worker
+directory. The worker is removed after its file finishes. A copy left under
+`target/mutator-backup/` by an interrupted older run is restored before a
+non-scan run.
 
 Timeouts terminate the test process and its descendants before worker cleanup.
 Windows uses a native Job Object, including when a test's parent process has
@@ -113,7 +133,7 @@ uml-viewer loads every `*.edn` file under `.metrics/mutate`. Each file is one na
 
 ## What each language mutates
 
-Tokens inside strings, comments, and quoted Clojure forms are left alone. A replacement that does not compile fails the test run and counts as killed.
+Tokens inside strings, comments, and quoted Clojure forms are left alone.
 
 | Language | Mutations |
 | --- | --- |
@@ -133,17 +153,21 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 | --- | --- | --- |
 | Clojure | `clj -M:spec --tag ~no-mutate` when Speclj is on the classpath, otherwise `clj -M:test` or `bb spec` | nearest `deps.edn` or `bb.edn` |
 | Java | `mvn -q test -DexcludeTags=no-mutate` | nearest `pom.xml` |
-| Go | `go test -count=1` of the file's package | nearest `go.mod` |
+| Go | `go test -json -count=1` of the file's package | nearest `go.mod` |
 | TypeScript | `npm test` | nearest `package.json` |
-| Rust | `cargo test` | nearest `Cargo.toml` |
+| Rust | `cargo test --message-format=json` | nearest `Cargo.toml` |
 | Python | the project's `.venv` or `venv` Python running `pytest`, or `unittest discover` | nearest project file |
 | C# | `dotnet test` | project root |
 
 Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A file missing from the report is treated as uncovered, and the run says so.
+Languages that use LCOV can also read Cobertura reports. LCOV takes precedence
+when both formats cover the same file.
 
-C# uses the companion Crapper with Roslyn support and the .NET 10 SDK. Use
-`--use-existing-coverage` with an LCOV report, `--coverage-command` to
-produce it, or `--no-coverage` to run every site.
+C# uses the companion Crapper with Roslyn support and the .NET 10 SDK.
+Pass `--use-existing-coverage` or `--coverage-command` with your C# collector.
+When supplying `--test-command` for a compiled language, keep its test
+and compiler diagnostics in the output. TypeScript uses the project's test
+script and its exit status.
 
 Python environments use `Scripts/python.exe` on Windows and `bin/python` on
 Linux and macOS. Generated commands preserve argument boundaries. User-written
