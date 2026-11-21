@@ -234,3 +234,56 @@ def test_a_site_remembers_where_its_statement_starts(tmp_path):
     assert (4, "+", 2) in anchors
     assert (4, "1", 2) in anchors
     assert (7, "true", 6) in anchors
+
+
+def test_csharp_updates_assignments_and_bitwise_operators(tmp_path):
+    source = """// Ω
+class Counter
+{
+    public static int Update(int count)
+    {
+        ++count;
+        count++;
+        --count;
+        return count--;
+    }
+
+    public static int Accumulate(int count, int delta)
+    {
+        count += delta;
+        count -= delta;
+        count *= delta;
+        count /= delta;
+        count %= delta;
+        return count;
+    }
+
+    public static int Remainder(int value, int divisor) => value % divisor;
+    public static string Initialize(ref string? value, string fallback) => value ??= fallback;
+    public static int Mask(int value, int mask) => (~value & mask) | ((value << mask) >> mask);
+    public static unsafe void Address(int value) { int* address = &value; }
+    public static int Last(int[] values) => values[^2];
+    ~Counter() { }
+}
+"""
+    sites = _sites(tmp_path, "Counter.cs", source)
+    assert [(site.name, site.original, site.mutant) for site in sites] == [
+        ("Update", "++", "--"),
+        ("Update", "++", "--"),
+        ("Update", "--", "++"),
+        ("Update", "--", "++"),
+        ("Accumulate", "+=", "-="),
+        ("Accumulate", "-=", "+="),
+        ("Accumulate", "*=", "/="),
+        ("Accumulate", "/=", "*="),
+        ("Accumulate", "%=", "/="),
+        ("Remainder", "%", "/"),
+        ("Initialize", "??=", "="),
+        ("Mask", "~", ""),
+        ("Mask", "&", "|"),
+        ("Mask", "|", "&"),
+        ("Mask", "<<", ">>"),
+        ("Mask", ">>", "<<"),
+    ]
+    data = source.encode("utf-8")
+    assert all(data[site.start:site.end].decode("utf-8") == site.original for site in sites)

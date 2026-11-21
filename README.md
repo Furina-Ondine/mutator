@@ -143,7 +143,7 @@ Tokens inside strings, comments, and quoted Clojure forms are left alone.
 | TypeScript | the Java set, plus `===`/`!==`, `??` to `||`, and `?.` to `.`. A call or index drops `?.` (`a?.()` becomes `a()`). `.js`, `.jsx`, `.mjs`, and `.cjs` use these rules. |
 | Rust | the Java set (`&&`/`||`, `!`, unary `-`). |
 | Python | the Java set, spelled `and`/`or`, `not`, and `True`/`False`. |
-| C# | arithmetic, comparison, Boolean and pattern operators, unary negation, and `0`/`1` in shared Roslyn member spans. |
+| C# | arithmetic and compound assignment, increment/decrement, comparisons, Boolean and pattern operators, bitwise operators, shifts, conditional branches, null coalescing and null-conditional access, and `0`/`1` in Roslyn member spans. |
 
 ## Tests and coverage
 

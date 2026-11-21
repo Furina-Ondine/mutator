@@ -27,8 +27,10 @@ class Site:
     @property
     def description(self) -> str:
         if self.mutant == "":
-            return f"delete {self.original}"
-        return f"{self.original} -> {self.mutant}"
+            description = f"delete {self.original}"
+        else:
+            description = f"{self.original} -> {self.mutant}"
+        return description.replace("\r\n", "\n").replace("\r", "\\r").replace("\n", "\\n")
 
 
 @dataclass
