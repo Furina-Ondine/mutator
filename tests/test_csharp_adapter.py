@@ -51,3 +51,13 @@ def test_csharp_uses_dotnet_test_from_the_project_root(tmp_path):
         ["dotnet", "test"],
         tmp_path.resolve(),
     )
+
+
+def test_scan_reports_csharp_parse_error_without_a_traceback(tmp_path, capsys):
+    path = tmp_path / "Broken.cs"
+    path.write_text("class Broken { int Run( { }", encoding="utf-8")
+    assert run(["--root", str(tmp_path), "--scan", "--no-coverage", str(path)]) == 2
+    captured = capsys.readouterr()
+    assert "Broken.cs:1:" in captured.err
+    assert "CS" in captured.err
+    assert not (tmp_path / ".metrics").exists()

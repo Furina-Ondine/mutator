@@ -11,6 +11,7 @@ from pathlib import Path
 from mutator.crapper_link import ensure_crapper
 from mutator.coverage import covered_lines
 from mutator.engine import mutate_file, restore_backups, scan_file
+from mutator.functions import CSharpAnalysisError
 from mutator.report import format_results, format_site_log
 from mutator.runner import CommandRunner
 
@@ -583,9 +584,13 @@ def run(argv: list[str] | None = None) -> int:
     coverage = _prepare_coverage(options, root, files)
     if coverage != 0:
         return coverage
-    if options.scan:
-        return _scan(options, root, files)
-    return _mutate_files(options, root, files)
+    try:
+        if options.scan:
+            return _scan(options, root, files)
+        return _mutate_files(options, root, files)
+    except CSharpAnalysisError as exc:
+        print(exc, file=sys.stderr)
+        return 2
 
 
 def main(argv: list[str] | None = None) -> None:

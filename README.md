@@ -123,7 +123,7 @@ Tokens inside strings, comments, and quoted Clojure forms are left alone. A repl
 | TypeScript | the Java set, plus `===`/`!==`, `??` to `||`, and `?.` to `.`. A call or index drops `?.` (`a?.()` becomes `a()`). `.js`, `.jsx`, `.mjs`, and `.cjs` use these rules. |
 | Rust | the Java set (`&&`/`||`, `!`, unary `-`). |
 | Python | the Java set, spelled `and`/`or`, `not`, and `True`/`False`. |
-| C# | arithmetic, comparison, Boolean and pattern operators, unary negation, and `0`/`1` in shared Tree-sitter member spans. |
+| C# | arithmetic, comparison, Boolean and pattern operators, unary negation, and `0`/`1` in shared Roslyn member spans. |
 
 ## Tests and coverage
 
@@ -141,7 +141,7 @@ The baseline command has to pass before any mutant runs. A mutant's timeout is t
 
 Coverage is generated with crapper's commands unless `--use-existing-coverage` or `--no-coverage` is set. A file missing from the report is treated as uncovered, and the run says so.
 
-C# needs the companion Crapper with C# source support. Use
+C# uses the companion Crapper with Roslyn support and the .NET 10 SDK. Use
 `--use-existing-coverage` with an LCOV report, `--coverage-command` to
 produce it, or `--no-coverage` to run every site.
 

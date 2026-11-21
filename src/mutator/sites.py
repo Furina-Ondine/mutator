@@ -181,7 +181,8 @@ def _is_statement(node_type: str) -> bool:
 def _statement_line(node) -> int:
     current = node.parent
     while current is not None:
-        if _is_statement(current.type):
+        roles = getattr(current, "roles", ())
+        if "statement" in roles or "declaration" in roles or _is_statement(current.type):
             return current.start_point[0] + 1
         current = current.parent
     return node.start_point[0] + 1
@@ -374,24 +375,20 @@ def discover_raw(source: str, language: str, path: str) -> list[RawSite]:
     return found
 
 
-_CSHARP_BINARY = {"binary_expression", "and_pattern", "or_pattern", "relational_pattern"}
-_CSHARP_UNARY = {"prefix_unary_expression", "negated_pattern"}
-_CSHARP_NONEXECUTABLE = {"attribute_list", "parameter_list", "bracketed_parameter_list"}
-
-
 def _visit_csharp_token(node, data: bytes, found: list[RawSite]) -> None:
     token = _text(data, node)
-    if node.type in {"true", "false"}:
+    if "boolean" in node.roles:
         _add(found, node, token, _BOOLEANS[token], "boolean")
-    _visit_constant(node, token, found)
-    if node.is_named:
+    if "number" in node.roles and token in {"0", "1"}:
+        _add(found, node, token, _flip01(token), "constant")
+    if "operator" not in node.roles:
         return
-    parent = _parent_type(node)
-    if parent in _CSHARP_BINARY:
+    parent = node.parent.roles
+    if "binary" in parent:
         mutant = _binary_mutant("csharp", token)
         if mutant is not None:
             _add(found, node, token, mutant, _category(token))
-    if parent in _CSHARP_UNARY and token in {"!", "not", "-"}:
+    if "unary" in parent and token in {"!", "not", "-"}:
         _add(found, node, token, "", "unary")
 
 
@@ -401,9 +398,9 @@ def discover_nodes(data: bytes, nodes) -> list[RawSite]:
     pending = list(reversed(nodes))
     while pending:
         node = pending.pop()
-        if node.type in _CSHARP_NONEXECUTABLE:
+        if "metadata" in node.roles or "type_scope" in node.roles:
             continue
-        if node.child_count:
+        if node.is_named:
             pending.extend(reversed(node.children))
         else:
             _visit_csharp_token(node, data, found)
