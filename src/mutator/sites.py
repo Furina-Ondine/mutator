@@ -26,9 +26,13 @@ _BINARY = {
     "!==": "===",
     "&&": "||",
     "||": "&&",
-    "??": "||",
     "and": "or",
     "or": "and",
+}
+
+_BINARY_OVERRIDES: dict[str, dict[str, str | None]] = {
+    "go": {"/": None},
+    "typescript": {"??": "||"},
 }
 
 _BINARY_PARENTS = {
@@ -135,11 +139,8 @@ def _category(token: str) -> str:
 
 
 def _binary_mutant(language: str, token: str) -> str | None:
-    if language == "go" and token == "/":
-        return None
-    if token == "??" and language != "typescript":
-        return None
-    return _BINARY.get(token)
+    overrides = _BINARY_OVERRIDES.get(language, {})
+    return overrides.get(token, _BINARY.get(token))
 
 
 def _optional_mutant(node) -> str | None:
